@@ -223,10 +223,16 @@ class TestChannelObserverStartup:
         assert result == HookResult.CONTINUE
         assert value is None
 
-    @pytest.mark.skip(reason="Phase 6: Module import issue, needs __init__.py update")
     @pytest.mark.asyncio
     async def test_on_startup_returns_refs(self, loaded_plugin):
         """on_startup should return runtime references."""
+        # Import modules to ensure they can be patched
+        import seosoyoung_plugins.channel_observer.store
+        import seosoyoung_plugins.channel_observer.collector
+        import seosoyoung_plugins.channel_observer.intervention
+        import seosoyoung_plugins.channel_observer.observer
+        import seosoyoung_plugins.channel_observer.scheduler
+
         mock_store_cls = MagicMock()
         mock_collector_cls = MagicMock()
         mock_history_cls = MagicMock()

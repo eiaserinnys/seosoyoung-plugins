@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 import threading
 from pathlib import Path
@@ -353,7 +353,7 @@ class TestToGoReturnRetrack:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
+            
             session_manager=MagicMock(create=MagicMock()),
             config={
                 "watch_lists": {"to_go": "list_togo"},
@@ -444,38 +444,6 @@ class TestPreemptiveCompact:
 
         # Exception should not propagate
         watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
-
-    @pytest.mark.skip(reason="Phase 6: session_manager removed, test no longer applicable")
-    def test_compact_updates_session_id_when_changed(self, tmp_path):
-        """compact 후 세션 ID가 변경되면 session_manager에 업데이트"""
-        from seosoyoung.slackbot.soulstream.session import Session
-
-        mock_session_manager = MagicMock()
-        mock_session = Session(
-            thread_ts="1234.5678",
-            channel_id="C12345",
-            session_id="old-session-id",
-        )
-        mock_session_manager.get.return_value = mock_session
-
-        watcher = _make_watcher(tmp_path, session_manager=mock_session_manager)
-
-        mock_result = MagicMock()
-        mock_result.success = True
-        mock_result.session_id = "new-session-id"  # 변경된 session_id
-
-        with patch("seosoyoung.rescue.claude.agent_runner.ClaudeRunner") as MockRunner:
-            mock_runner_instance = MagicMock()
-            mock_runner_instance.run_sync.return_value = mock_result
-            MockRunner.return_value = mock_runner_instance
-
-            watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
-
-            # session_manager.update_session_id가 새 ID로 호출되었는지 확인
-            mock_session_manager.update_session_id.assert_called_once_with(
-                "1234.5678", "new-session-id"
-            )
-
 
 class TestCheckRunListLabelsFiltering:
     """_check_run_list_labels 운영 리스트 필터링 및 가드 테스트"""
@@ -611,7 +579,7 @@ class TestProcessListRunCardTracked:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
+            
             list_runner_ref=lambda: list_runner,
         )
 
@@ -743,20 +711,16 @@ class TestListRunDuplicatePrevention:
             f"_start_list_run이 {start_call_count}번 호출됨 (기대: ≤1)"
         )
 
-    def test_tracked_card_skipped_in_list_run(self, tmp_path):
+    def test_tracked_card_skipped_in_list_run(self, tmp_path, mock_plugin_sdk):
         """다른 세션에서 처리 중인 카드(다른 thread_ts)는 skipped_duplicate로 처리"""
         from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
 
         mock_trello = MagicMock()
-        mock_slack = MagicMock()
-        mock_slack.chat_postMessage.return_value = {"ts": "ts_123"}
-
         list_runner = ListRunner(data_dir=tmp_path)
 
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
             list_runner_ref=lambda: list_runner,
         )
 
@@ -868,19 +832,15 @@ class TestMultiCardChainingIntegration:
     """
 
     @patch("seosoyoung.slackbot.plugins.trello.watcher.threading.Thread", _SyncThread)
-    @pytest.mark.skip(reason="Phase 6: Requires refactoring for plugin_sdk-only architecture")
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_three_card_chaining_completes(self, tmp_path):
+    def test_three_card_chaining_completes(self, tmp_path, mock_plugin_sdk):
         """3장의 카드가 순차적으로 처리되고 세션이 COMPLETED 상태가 됨"""
         from seosoyoung_plugins.trello.client import TrelloCard
         from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
 
         mock_trello = MagicMock()
         list_runner = ListRunner(data_dir=tmp_path)
-        mock_slack = MagicMock()
-        mock_slack.chat_postMessage.return_value = {"ts": "thread_123"}
 
-        def sync_spawn(*, session, prompt, thread_ts, channel,
+        def sync_spawn(*, prompt, thread_ts, channel,
                        tracked, dm_channel_id=None, dm_thread_ts=None,
                        on_success=None, on_error=None, on_finally=None):
             if on_success:
@@ -891,7 +851,6 @@ class TestMultiCardChainingIntegration:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
             list_runner_ref=lambda: list_runner,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
@@ -933,20 +892,16 @@ class TestMultiCardChainingIntegration:
             "card_c": "completed",
         }
 
-    @patch("seosoyoung.slackbot.plugins.trello.watcher.threading.Thread", _SyncThread)
-    @pytest.mark.skip(reason="Phase 6: Requires refactoring for plugin_sdk-only architecture")
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_chaining_continues_after_compact_failure(self, tmp_path):
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_chaining_continues_after_compact_failure(self, tmp_path, mock_plugin_sdk):
         """_preemptive_compact 실패해도 체인이 끊기지 않음"""
         from seosoyoung_plugins.trello.client import TrelloCard
         from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
 
         mock_trello = MagicMock()
         list_runner = ListRunner(data_dir=tmp_path)
-        mock_slack = MagicMock()
-        mock_slack.chat_postMessage.return_value = {"ts": "thread_123"}
 
-        def sync_spawn(*, session, prompt, thread_ts, channel,
+        def sync_spawn(*, prompt, thread_ts, channel,
                        tracked, dm_channel_id=None, dm_thread_ts=None,
                        on_success=None, on_error=None, on_finally=None):
             if on_success:
@@ -957,7 +912,6 @@ class TestMultiCardChainingIntegration:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
             list_runner_ref=lambda: list_runner,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
@@ -992,14 +946,9 @@ class TestMultiCardChainingIntegration:
         assert updated.status == SessionStatus.COMPLETED
         assert updated.current_index == 2
 
-    @pytest.mark.skip(reason="Phase 6: Requires refactoring for plugin_sdk-only architecture")
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_on_success_exception_does_not_trigger_on_error(self, tmp_path):
+    def test_on_success_exception_does_not_trigger_on_error(self, tmp_path, mock_plugin_sdk):
         """on_success 예외가 on_error를 트리거하지 않음 (_spawn_claude_thread 격리 검증)"""
-        mock_slack = MagicMock()
-        mock_slack.chat_postMessage.return_value = {"ts": "thread_123"}
-
-        watcher = _make_watcher(tmp_path, slack_client=mock_slack)
+        watcher = _make_watcher(tmp_path)
 
         tracked = TrackedCard(
             card_id="card_test",
@@ -1023,7 +972,6 @@ class TestMultiCardChainingIntegration:
         # _spawn_claude_thread 직접 호출 후 스레드 완료 대기
         watcher.get_session_lock = None
         watcher._spawn_claude_thread(
-            session=MagicMock(),
             prompt="test",
             thread_ts="thread_123",
             channel="C12345",
@@ -1053,7 +1001,7 @@ class TestMultiCardChainingIntegration:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
+            
             list_runner_ref=lambda: list_runner,
             config={"list_ids": {"in_progress": "list_ip"}},
         )
@@ -1070,44 +1018,23 @@ class TestMultiCardChainingIntegration:
         updated = list_runner.get_session(session.session_id)
         assert updated.status == SessionStatus.PAUSED
 
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_compact_timeout_does_not_block_chain(self, tmp_path):
-        """_preemptive_compact 타임아웃 시 체인이 계속됨"""
+    def test_compact_timeout_does_not_block_chain(self, tmp_path, mock_plugin_sdk):
+        """_preemptive_compact 타임아웃 시 체인이 계속됨 (plugin_sdk 사용)"""
         import concurrent.futures
-        from seosoyoung.slackbot.soulstream.session import Session
 
-        mock_session_manager = MagicMock()
-        mock_session = Session(
-            thread_ts="1234.5678",
-            channel_id="C12345",
-            session_id="test-session",
-        )
-        mock_session_manager.get.return_value = mock_session
+        watcher = _make_watcher(tmp_path)
 
-        watcher = _make_watcher(tmp_path, session_manager=mock_session_manager)
+        # plugin_sdk.soulstream.get_session_id가 session_id를 반환하도록 설정
+        mock_plugin_sdk["soulstream"].get_session_id = AsyncMock(return_value="test-session")
+        # plugin_sdk.soulstream.compact가 TimeoutError를 raise하도록 설정
+        mock_plugin_sdk["soulstream"].compact = AsyncMock(side_effect=concurrent.futures.TimeoutError())
 
-        # future.result()가 TimeoutError를 raise하도록 mock 설정
-        mock_future = MagicMock()
-        mock_future.result.side_effect = concurrent.futures.TimeoutError()
+        # TimeoutError가 발생해도 정상 반환 (예외 전파 없음)
+        # _preemptive_compact는 내부에서 plugin_sdk.soulstream.compact를 호출함
+        watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
 
-        mock_pool = MagicMock()
-        mock_pool.__enter__ = MagicMock(return_value=mock_pool)
-        mock_pool.__exit__ = MagicMock(return_value=False)
-        mock_pool.submit.return_value = mock_future
-
-        with patch("seosoyoung.rescue.claude.agent_runner.ClaudeRunner") as MockRunner, \
-             patch("concurrent.futures.ThreadPoolExecutor", return_value=mock_pool):
-            MockRunner.return_value = MagicMock()
-
-            # TimeoutError가 발생해도 정상 반환 (예외 전파 없음)
-            watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
-
-            # submit이 호출되었는지 확인
-            mock_pool.submit.assert_called_once()
-            # future.result()에 timeout이 전달되었는지 확인
-            mock_future.result.assert_called_once_with(
-                timeout=watcher.COMPACT_TIMEOUT_SECONDS
-            )
+        # soulstream.compact가 호출되었는지 확인
+        mock_plugin_sdk["soulstream"].compact.assert_called_once()
 
 
 class TestSpawnClaudeThreadLockHandling:
@@ -1119,8 +1046,7 @@ class TestSpawnClaudeThreadLockHandling:
     버그 3: on_success()가 락 해제 전에 호출되어 다음 스레드가 락 획득에 실패하는 문제.
     """
 
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_lock_released_before_on_success_next_thread_can_acquire(self, tmp_path):
+    def test_lock_released_before_on_success_next_thread_can_acquire(self, tmp_path, mock_plugin_sdk):
         """on_success에서 시작한 새 스레드가 같은 thread_ts 락을 즉시 획득할 수 있어야 함
 
         버그 3 검증:
@@ -1167,7 +1093,6 @@ class TestSpawnClaudeThreadLockHandling:
             event.set()
 
         watcher._spawn_claude_thread(
-            session=MagicMock(),
             prompt="test",
             thread_ts="thread_lock_test",
             channel="C12345",
@@ -1186,8 +1111,7 @@ class TestSpawnClaudeThreadLockHandling:
             "락 해제 후에 on_success()를 호출해야 합니다."
         )
 
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_watcher_does_not_double_manage_lock(self, tmp_path):
+    def test_watcher_does_not_double_manage_lock(self, tmp_path, mock_plugin_sdk):
         """watcher가 락을 직접 관리하지 않아도 executor가 올바르게 처리함을 검증
 
         버그 1·2 검증:
@@ -1239,7 +1163,6 @@ class TestSpawnClaudeThreadLockHandling:
             done.set()
 
         watcher._spawn_claude_thread(
-            session=MagicMock(),
             prompt="test",
             thread_ts="thread_double_lock",
             channel="C12345",
@@ -1268,8 +1191,7 @@ class TestListRunOnSuccessLockOrder:
     """
 
     @patch("seosoyoung.slackbot.plugins.trello.watcher.threading.Thread", _SyncThread)
-    @pytest.mark.skip(reason="Phase 6: Complex integration test needs complete refactoring")
-    def test_lock_state_after_on_success_with_real_lock(self, tmp_path):
+    def test_lock_state_after_on_success_with_real_lock(self, tmp_path, mock_plugin_sdk):
         """실제 락과 _spawn_claude_thread를 사용할 때 on_success 시 락이 해제되어 있어야 함
 
         버그 3의 전체 시나리오:
@@ -1295,7 +1217,7 @@ class TestListRunOnSuccessLockOrder:
         watcher = _make_watcher(
             tmp_path,
             trello_client=mock_trello,
-            slack_client=mock_slack,
+            
             list_runner_ref=lambda: list_runner,
             get_session_lock=get_session_lock,
         )
@@ -1317,7 +1239,7 @@ class TestListRunOnSuccessLockOrder:
 
         original_spawn = watcher._spawn_claude_thread
 
-        def intercepting_spawn(*, session, prompt, thread_ts, channel,
+        def intercepting_spawn(*, prompt, thread_ts, channel,
                                tracked, dm_channel_id=None, dm_thread_ts=None,
                                on_success=None, on_error=None, on_finally=None):
             def wrapped_on_success():
@@ -1335,7 +1257,6 @@ class TestListRunOnSuccessLockOrder:
                 if on_success:
                     on_success()
             original_spawn(
-                session=session,
                 prompt=prompt,
                 thread_ts=thread_ts,
                 channel=channel,
