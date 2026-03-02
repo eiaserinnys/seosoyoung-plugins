@@ -72,7 +72,6 @@ class TestTrelloPluginLifecycle:
         await plugin.on_load(SAMPLE_CONFIG)
         assert plugin._watcher is None
         assert plugin._list_runner is None
-        assert plugin._slack_client is None
 
     @pytest.mark.asyncio
     async def test_on_load_missing_key_raises(self, plugin):
@@ -137,13 +136,8 @@ class TestTrelloOnStartup:
         ctx = HookContext(
             hook_name="on_startup",
             args={
-                "slack_client": mock_client,
-                "session_manager": mock_session_mgr,
-                "session_runtime": mock_session_runtime,
-                "claude_runner_factory": mock_runner_factory,
                 "get_session_lock": MagicMock(),
                 "restart_manager": MagicMock(),
-                "update_message_fn": MagicMock(),
                 "data_dir": tmp_path,
             },
         )
@@ -166,19 +160,11 @@ class TestTrelloOnStartup:
 
     @pytest.mark.asyncio
     async def test_on_startup_stores_runtime_deps(self, loaded_plugin, tmp_path):
-        mock_client = MagicMock()
-        mock_session_mgr = MagicMock()
-
         ctx = HookContext(
             hook_name="on_startup",
             args={
-                "slack_client": mock_client,
-                "session_manager": mock_session_mgr,
-                "session_runtime": MagicMock(),
-                "claude_runner_factory": MagicMock(),
                 "get_session_lock": MagicMock(),
                 "restart_manager": MagicMock(),
-                "update_message_fn": MagicMock(),
                 "data_dir": tmp_path,
             },
         )
@@ -187,8 +173,9 @@ class TestTrelloOnStartup:
         with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher"):
             await hooks["on_startup"](ctx)
 
-        assert loaded_plugin._slack_client is mock_client
-        assert loaded_plugin._session_manager is mock_session_mgr
+        # Plugin no longer stores slack_client/session_manager
+        assert loaded_plugin._get_session_lock is not None
+        assert loaded_plugin._restart_manager is not None
 
 
 class TestTrelloOnShutdown:

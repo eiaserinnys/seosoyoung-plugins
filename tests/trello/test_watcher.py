@@ -17,9 +17,6 @@ def _make_watcher(tmp_path, **overrides):
     """
     trello_client = overrides.pop("trello_client", MagicMock())
     prompt_builder = overrides.pop("prompt_builder", MagicMock())
-    slack_client = overrides.pop("slack_client", MagicMock())
-    session_manager = overrides.pop("session_manager", MagicMock())
-    claude_runner_factory = overrides.pop("claude_runner_factory", MagicMock())
     get_session_lock = overrides.pop("get_session_lock", None)
     list_runner_ref = overrides.pop("list_runner_ref", None)
     data_dir = overrides.pop("data_dir", tmp_path)
@@ -52,9 +49,6 @@ def _make_watcher(tmp_path, **overrides):
     return TrelloWatcher(
         trello_client=trello_client,
         prompt_builder=prompt_builder,
-        slack_client=slack_client,
-        session_manager=session_manager,
-        claude_runner_factory=claude_runner_factory,
         config=default_config,
         get_session_lock=get_session_lock,
         data_dir=data_dir,
