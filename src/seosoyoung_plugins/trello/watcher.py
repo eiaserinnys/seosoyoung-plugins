@@ -2,10 +2,10 @@
 
 Config 싱글턴 의존성 없이, 생성자에서 설정을 직접 받습니다.
 
-NOTE: 이 파일은 seosoyoung 패키지에 대한 의존성이 있습니다.
-Phase 5에서 import 경로가 수정될 예정입니다.
+Uses plugin_sdk API instead of direct host dependencies.
 """
 
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
+from seosoyoung.plugin_sdk import slack, soulstream
 from seosoyoung_plugins.trello.client import TrelloClient, TrelloCard
 from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
@@ -62,9 +63,6 @@ class TrelloWatcher:
         *,
         trello_client: TrelloClient,
         prompt_builder: PromptBuilder,
-        slack_client,
-        session_manager,
-        claude_runner_factory: Callable,
         config: dict,
         get_session_lock: Optional[Callable[[str], threading.Lock]] = None,
         data_dir: Optional[Path] = None,
@@ -74,17 +72,11 @@ class TrelloWatcher:
         Args:
             trello_client: TrelloClient 인스턴스
             prompt_builder: PromptBuilder 인스턴스
-            slack_client: Slack WebClient
-            session_manager: SessionManager 인스턴스
-            claude_runner_factory: Claude 실행 팩토리
             config: 플러그인 설정 dict (YAML에서 로드)
             get_session_lock: 스레드별 락 반환 함수
             data_dir: 상태 파일 저장 디렉토리
             list_runner_ref: ListRunner 참조 함수
         """
-        self.slack_client = slack_client
-        self.session_manager = session_manager
-        self.claude_runner_factory = claude_runner_factory
         self.get_session_lock = get_session_lock
         self.list_runner_ref = list_runner_ref
 
@@ -120,6 +112,7 @@ class TrelloWatcher:
         self._stop_event = threading.Event()
         self._paused = False
         self._pause_lock = threading.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         # 리스트 정주행 직렬화 락
         self._list_run_lock = threading.Lock()
@@ -264,12 +257,19 @@ class TrelloWatcher:
 
     def _run(self):
         """워처 메인 루프"""
-        while not self._stop_event.is_set():
-            try:
-                self._poll()
-            except Exception as e:
-                logger.exception(f"워처 폴링 오류: {e}")
-            self._stop_event.wait(timeout=self.poll_interval)
+        # Create event loop for this thread
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self._poll()
+                except Exception as e:
+                    logger.exception(f"워처 폴링 오류: {e}")
+                self._stop_event.wait(timeout=self.poll_interval)
+        finally:
+            self._loop.close()
 
     def _poll(self):
         """리스트 폴링"""
@@ -336,9 +336,11 @@ class TrelloWatcher:
                     logger.info(f"카드 이동 완료: {card.name}")
                     try:
                         channel = self._get_dm_or_notify_channel()
-                        self.slack_client.chat_postMessage(
-                            channel=channel,
-                            text=f"✅ <{card.url}|*{card.name}*>"
+                        self._loop.run_until_complete(
+                            slack.send_message(
+                                channel=channel,
+                                text=f"✅ <{card.url}|*{card.name}*>"
+                            )
                         )
                     except Exception as e:
                         logger.error(f"완료 알림 전송 실패: {e}")
@@ -384,8 +386,11 @@ class TrelloWatcher:
     def _get_dm_or_notify_channel(self) -> str:
         if self.dm_target_user_id:
             try:
-                dm_result = self.slack_client.conversations_open(users=self.dm_target_user_id)
-                return dm_result["channel"]["id"]
+                dm_channel_id = self._loop.run_until_complete(
+                    slack.open_dm(self.dm_target_user_id)
+                )
+                if dm_channel_id:
+                    return dm_channel_id
             except Exception as e:
                 logger.warning(f"DM 채널 열기 실패 (notify_channel로 폴백): {e}")
         return self.notify_channel
@@ -394,18 +399,28 @@ class TrelloWatcher:
         if not self.dm_target_user_id:
             return None, None
         try:
-            dm_result = self.slack_client.conversations_open(users=self.dm_target_user_id)
-            dm_channel_id = dm_result["channel"]["id"]
-            anchor_text = f"🎫 *<{card_url}|{card_name}>*\n`사고 과정을 기록합니다...`"
-            anchor_msg = self.slack_client.chat_postMessage(
-                channel=dm_channel_id,
-                text=anchor_text,
-                blocks=[{
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": anchor_text}
-                }]
+            dm_channel_id = self._loop.run_until_complete(
+                slack.open_dm(self.dm_target_user_id)
             )
-            dm_thread_ts = anchor_msg["ts"]
+            if not dm_channel_id:
+                return None, None
+
+            anchor_text = f"🎫 *<{card_url}|{card_name}>*\n`사고 과정을 기록합니다...`"
+            result = self._loop.run_until_complete(
+                slack.send_message(
+                    channel=dm_channel_id,
+                    text=anchor_text,
+                    blocks=[{
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": anchor_text}
+                    }]
+                )
+            )
+            if not result.ok:
+                logger.warning(f"DM 앵커 메시지 전송 실패: {result.error}")
+                return None, None
+
+            dm_thread_ts = result.ts
             logger.info(f"DM 스레드 생성: channel={dm_channel_id}, thread_ts={dm_thread_ts}")
             return dm_channel_id, dm_thread_ts
         except Exception as e:
@@ -438,16 +453,27 @@ class TrelloWatcher:
             header = self._build_header(card.name, card.url)
             initial_text = f"{header}\n\n`소영이 생각합니다...`"
             try:
-                msg_result = self.slack_client.chat_postMessage(
-                    channel=self.notify_channel, text=initial_text
+                result = self._loop.run_until_complete(
+                    slack.send_message(
+                        channel=self.notify_channel,
+                        text=initial_text
+                    )
                 )
-                thread_ts = msg_result["ts"]
+                if not result.ok:
+                    logger.error(f"알림 전송 실패: {result.error}")
+                    return
+
+                thread_ts = result.ts
                 msg_channel = self.notify_channel
                 logger.info(f"알림 전송 완료 (폴백): thread_ts={thread_ts}")
                 reaction = "arrow_forward" if has_execute else "thought_balloon"
                 try:
-                    self.slack_client.reactions_add(
-                        channel=self.notify_channel, timestamp=thread_ts, name=reaction
+                    self._loop.run_until_complete(
+                        slack.add_reaction(
+                            channel=self.notify_channel,
+                            ts=thread_ts,
+                            emoji=reaction
+                        )
                     )
                 except Exception as e:
                     logger.debug(f"초기 상태 리액션 추가 실패: {e}")
@@ -471,11 +497,6 @@ class TrelloWatcher:
         self._save_tracked()
         self._register_thread_card(tracked)
 
-        session = self.session_manager.create(
-            thread_ts=thread_ts, channel_id=msg_channel,
-            user_id="trello_watcher", username="trello_watcher", role="admin"
-        )
-
         prompt = self.prompt_builder.build_to_go(card, has_execute)
         card_id_for_cleanup = card.id
         card_name_with_spinner = f"🌀 {card.name}"
@@ -488,7 +509,7 @@ class TrelloWatcher:
             self._untrack_card(card_id_for_cleanup)
 
         self._spawn_claude_thread(
-            session=session, prompt=prompt, thread_ts=thread_ts,
+            prompt=prompt, thread_ts=thread_ts,
             channel=msg_channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
             on_finally=on_finally,
@@ -501,7 +522,6 @@ class TrelloWatcher:
     def _spawn_claude_thread(
         self,
         *,
-        session,
         prompt: str,
         thread_ts: str,
         channel: str,
@@ -512,48 +532,36 @@ class TrelloWatcher:
         on_error: Optional[Callable] = None,
         on_finally: Optional[Callable] = None,
     ):
-        """Claude 실행 스레드 스포닝
-
-        NOTE: 이 메서드는 seosoyoung 패키지에 대한 의존성이 있습니다.
-        Phase 5에서 수정될 예정입니다.
-        """
-        # NOTE: 아래 import들은 Phase 5에서 수정될 예정
-        # from seosoyoung.slackbot.presentation.types import PresentationContext
-        # from seosoyoung.slackbot.presentation.progress import build_progress_callbacks
-        # from seosoyoung.slackbot.slack.formatting import update_message
+        """Claude 실행 스레드 스포닝 (plugin_sdk 사용)"""
 
         def run_claude():
-            # 동적 임포트 - Phase 5에서 수정 예정
-            from seosoyoung.slackbot.presentation.types import PresentationContext
-            from seosoyoung.slackbot.presentation.progress import build_progress_callbacks
-            from seosoyoung.slackbot.slack.formatting import update_message
-
             claude_succeeded = False
             try:
-                def say(text, thread_ts=None, **kwargs):
-                    self.slack_client.chat_postMessage(
+                # Get existing session_id if available
+                session_id = soulstream.get_session_id(thread_ts)
+
+                # Run Claude using plugin_sdk
+                result = self._loop.run_until_complete(
+                    soulstream.run(
+                        prompt=prompt,
                         channel=channel,
-                        thread_ts=thread_ts or tracked.thread_ts,
-                        text=text
+                        thread_ts=thread_ts,
+                        role="admin",
+                        session_id=session_id,
                     )
-
-                pctx = PresentationContext(
-                    channel=channel, thread_ts=thread_ts, msg_ts=thread_ts,
-                    say=say, client=self.slack_client, effective_role="admin",
-                    session_id=session.session_id, user_id="trello_watcher",
-                    last_msg_ts=thread_ts, main_msg_ts=thread_ts,
-                    trello_card=tracked, is_trello_mode=True,
-                    dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
                 )
 
-                on_progress, on_compact = build_progress_callbacks(pctx, update_message)
+                if result.ok:
+                    claude_succeeded = True
+                    # Update tracked card with session_id
+                    if result.session_id:
+                        tracked.session_id = result.session_id
+                        self.update_tracked_session_id(tracked.card_id, result.session_id)
+                else:
+                    logger.error(f"Claude 실행 실패 (워처): {result.error}")
+                    if on_error:
+                        on_error(Exception(result.error))
 
-                self.claude_runner_factory(
-                    prompt=prompt, thread_ts=thread_ts, msg_ts=thread_ts,
-                    on_progress=on_progress, on_compact=on_compact,
-                    presentation=pctx, session_id=session.session_id, role="admin",
-                )
-                claude_succeeded = True
             except Exception as e:
                 logger.exception(f"Claude 실행 오류 (워처): {e}")
                 if on_error:
@@ -635,21 +643,19 @@ class TrelloWatcher:
     def _preemptive_compact(self, thread_ts: str, channel: str, card_name: str):
         """카드 완료 후 선제적 컨텍스트 컴팩트
 
-        NOTE: 이 메서드는 seosoyoung 패키지에 대한 의존성이 있습니다.
-        Phase 5에서 수정될 예정입니다.
+        Uses plugin_sdk soulstream.compact() API.
         """
-        session = self.session_manager.get(thread_ts)
-        if not session or not session.session_id:
+        session_id = soulstream.get_session_id(thread_ts)
+        if not session_id:
             logger.warning(f"선제적 컴팩트 스킵: 세션 없음 (card={card_name})")
             return
 
         try:
-            # NOTE: 아래 import는 Phase 5에서 수정될 예정
-            from seosoyoung.rescue.claude.agent_runner import ClaudeRunner
-            runner = ClaudeRunner()
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(runner.run_sync, runner.compact_session(session.session_id))
+                future = pool.submit(
+                    self._loop.run_until_complete,
+                    soulstream.compact(session_id)
+                )
                 try:
                     result = future.result(timeout=self.COMPACT_TIMEOUT_SECONDS)
                 except concurrent.futures.TimeoutError:
@@ -658,10 +664,8 @@ class TrelloWatcher:
                     )
                     return
 
-            if result.success:
+            if result.ok:
                 logger.info(f"선제적 컴팩트 완료: card={card_name}")
-                if result.session_id and result.session_id != session.session_id:
-                    self.session_manager.update_session_id(thread_ts, result.session_id)
             else:
                 logger.warning(f"선제적 컴팩트 실패: card={card_name}, error={result.error}")
         except Exception as e:
@@ -692,17 +696,22 @@ class TrelloWatcher:
                 card_preview = "\n".join([f"  • {c.name}" for c in cards[:5]])
                 if len(cards) > 5:
                     card_preview += f"\n  ... 외 {len(cards) - 5}개"
-                msg_result = self.slack_client.chat_postMessage(
-                    channel=self.notify_channel,
-                    text=(
-                        f"🚀 *리스트 정주행 시작*\n"
-                        f"📋 리스트: *{list_name}*\n"
-                        f"🎫 카드 수: {len(cards)}개\n"
-                        f"🔖 세션 ID: `{session.session_id}`\n\n"
-                        f"*처리할 카드:*\n{card_preview}"
+                result = self._loop.run_until_complete(
+                    slack.send_message(
+                        channel=self.notify_channel,
+                        text=(
+                            f"🚀 *리스트 정주행 시작*\n"
+                            f"📋 리스트: *{list_name}*\n"
+                            f"🎫 카드 수: {len(cards)}개\n"
+                            f"🔖 세션 ID: `{session.session_id}`\n\n"
+                            f"*처리할 카드:*\n{card_preview}"
+                        )
                     )
                 )
-                run_thread_ts = msg_result["ts"]
+                if not result.ok:
+                    logger.error(f"정주행 시작 알림 전송 실패: {result.error}")
+                    return
+                run_thread_ts = result.ts
             except Exception as e:
                 logger.error(f"정주행 시작 알림 전송 실패: {e}")
                 return
@@ -729,9 +738,12 @@ class TrelloWatcher:
             except Exception:
                 pass
             try:
-                self.slack_client.chat_postMessage(
-                    channel=channel, thread_ts=thread_ts,
-                    text=f"⚠️ 정주행 카드 처리 중 오류.\n세션 ID: `{session_id}`\n오류: {e}"
+                self._loop.run_until_complete(
+                    slack.send_message(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"⚠️ 정주행 카드 처리 중 오류.\n세션 ID: `{session_id}`\n오류: {e}"
+                    )
                 )
             except Exception:
                 pass
@@ -755,9 +767,12 @@ class TrelloWatcher:
         next_card_id = list_runner.get_next_card_id(session_id)
         if not next_card_id:
             list_runner.update_session_status(session_id, SessionStatus.COMPLETED)
-            self.slack_client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=f"✅ *리스트 정주행 완료*\n세션 ID: `{session_id}`"
+            self._loop.run_until_complete(
+                slack.send_message(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"✅ *리스트 정주행 완료*\n세션 ID: `{session_id}`"
+                )
             )
             logger.info(f"리스트 정주행 완료: {session_id}")
             return
@@ -786,14 +801,12 @@ class TrelloWatcher:
         self._add_spinner_prefix(card)
 
         progress = f"{session.current_index + 1}/{len(session.card_ids)}"
-        self.slack_client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text=f"▶️ [{progress}] <{card.url}|{card.name}>"
-        )
-
-        claude_session = self.session_manager.create(
-            thread_ts=thread_ts, channel_id=channel,
-            user_id="list_runner", username="list_runner", role="admin"
+        self._loop.run_until_complete(
+            slack.send_message(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"▶️ [{progress}] <{card.url}|{card.name}>"
+            )
         )
 
         prompt = self.prompt_builder.build_list_run(
@@ -834,13 +847,16 @@ class TrelloWatcher:
             self._remove_spinner_prefix(card.id, f"🌀 {card.name}")
             self._untrack_card(card.id)
             logger.error(f"정주행 카드 실패: card={card.name}, session={session_id}")
-            self.slack_client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=f"❌ 카드 처리 실패: {card.name}\n세션: `{session_id}` | 오류: {e}"
+            self._loop.run_until_complete(
+                slack.send_message(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"❌ 카드 처리 실패: {card.name}\n세션: `{session_id}` | 오류: {e}"
+                )
             )
 
         self._spawn_claude_thread(
-            session=claude_session, prompt=prompt, thread_ts=thread_ts,
+            prompt=prompt, thread_ts=thread_ts,
             channel=channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
             on_success=on_success, on_error=on_error,
