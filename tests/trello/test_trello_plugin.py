@@ -162,20 +162,17 @@ class TestTrelloOnStartup:
     async def test_on_startup_stores_runtime_deps(self, loaded_plugin, tmp_path):
         ctx = HookContext(
             hook_name="on_startup",
-            args={
-                "get_session_lock": MagicMock(),
-                "restart_manager": MagicMock(),
-                "data_dir": tmp_path,
-            },
+            args={},
         )
 
         hooks = loaded_plugin.register_hooks()
         with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher"):
             await hooks["on_startup"](ctx)
 
-        # Plugin no longer stores slack_client/session_manager
-        assert loaded_plugin._get_session_lock is not None
-        assert loaded_plugin._restart_manager is not None
+        # Plugin no longer stores runtime deps from ctx.args
+        # It uses plugin_sdk APIs instead
+        assert loaded_plugin._watcher is not None
+        assert loaded_plugin._list_runner is not None
 
 
 class TestTrelloOnShutdown:
@@ -201,13 +198,12 @@ class TestTrelloOnReaction:
     """on_reaction hook: execute emoji."""
 
     @pytest.fixture()
-    async def plugin_with_watcher(self):
+    async def plugin_with_watcher(self, mock_plugin_sdk):
         p = TrelloPlugin()
         await p.on_load(SAMPLE_CONFIG)
         p._watcher = MagicMock()
-        p._restart_manager = MagicMock()
-        p._restart_manager.is_pending = False
-        p._get_session_lock = None
+        # Mock soulstream backend for is_restart_pending
+        mock_plugin_sdk["soulstream"].is_restart_pending.return_value = False
         return p
 
     @pytest.mark.asyncio
@@ -263,7 +259,8 @@ class TestTrelloOnReaction:
 
     @pytest.mark.asyncio
     async def test_stop_when_restart_pending(self, plugin_with_watcher, mock_plugin_sdk):
-        plugin_with_watcher._restart_manager.is_pending = True
+        # Mock restart pending via soulstream backend
+        mock_plugin_sdk["soulstream"].is_restart_pending.return_value = True
         mock_tracked = MagicMock()
         mock_tracked.card_id = "card-123"
         mock_tracked.card_name = "Test Card"
@@ -334,19 +331,33 @@ class TestTrelloOnCommand:
         assert result == HookResult.SKIP
 
     @pytest.mark.asyncio
-    async def test_stop_resume_no_paused(self, plugin_with_runner):
+    async def test_stop_resume_no_paused(self, plugin_with_runner, mock_plugin_sdk):
         plugin_with_runner._list_runner.get_paused_sessions.return_value = []
-        mock_say = MagicMock()
 
         ctx = HookContext(
             hook_name="on_command",
-            args={"command": "정주행 재개", "say": mock_say, "ts": "ts", "thread_ts": None},
+            args={"command": "정주행 재개", "channel": "C123", "ts": "ts", "thread_ts": None},
         )
         hooks = plugin_with_runner.register_hooks()
         result, value = await hooks["on_command"](ctx)
+
         assert result == HookResult.STOP
-        mock_say.assert_called_once()
-        assert "없습니다" in mock_say.call_args[1]["text"]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        # Verify the message content
+        # AsyncMock records calls as: call(channel, text, thread_ts)
+        call_args = mock_plugin_sdk["slack"].send_message.call_args
+        args, kwargs = call_args
+
+        # Check if called with positional or keyword arguments
+        if kwargs and 'text' in kwargs:
+            text_arg = kwargs['text']
+        elif len(args) >= 2:
+            # Positional: send_message(channel, text, thread_ts)
+            text_arg = args[1]
+        else:
+            raise AssertionError(f"Cannot find text argument in call_args: {call_args}")
+
+        assert "없습니다" in text_arg
 
     @pytest.mark.asyncio
     async def test_stop_resume_success(self, plugin_with_runner):

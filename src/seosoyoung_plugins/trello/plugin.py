@@ -21,6 +21,26 @@ from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
+# Session locks (thread_ts -> Lock)
+_session_locks: dict[str, threading.RLock] = {}
+_locks_lock = threading.Lock()
+
+
+def _get_session_lock(thread_ts: str) -> threading.RLock:
+    """Get or create a session lock for the given thread.
+
+    Args:
+        thread_ts: Thread timestamp
+
+    Returns:
+        RLock for the thread
+    """
+    with _locks_lock:
+        if thread_ts not in _session_locks:
+            _session_locks[thread_ts] = threading.RLock()
+        return _session_locks[thread_ts]
+
+
 _RESUME_PATTERNS = [
     re.compile(r"정주행\s*(을\s*)?재개", re.IGNORECASE),
     re.compile(r"리스트런\s*(을\s*)?재개", re.IGNORECASE),
@@ -55,11 +75,12 @@ class TrelloPlugin(Plugin):
             list_ids=config["list_ids"],
         )
 
-        # Runtime dependencies, injected via on_startup hook.
-        self._get_session_lock = None
-        self._restart_manager = None
+        # Runtime state
         self._watcher = None
         self._list_runner = None
+
+        # Data directory for this plugin
+        self._data_dir = soulstream.get_data_dir() / "trello_watcher"
 
         logger.info(
             "TrelloPlugin loaded: board_id=%s, execute_emoji=%s",
@@ -83,22 +104,21 @@ class TrelloPlugin(Plugin):
     # -- Hook handlers ---------------------------------------------------------
 
     async def _on_startup(self, ctx: HookContext) -> tuple[HookResult, Any]:
-        """Receive runtime dependencies and start watcher."""
+        """Start watcher and list runner."""
         from seosoyoung_plugins.trello.watcher import TrelloWatcher
         from seosoyoung_plugins.trello.list_runner import ListRunner
 
-        self._get_session_lock = ctx.args.get("get_session_lock")
-        self._restart_manager = ctx.args.get("restart_manager")
+        # Ensure data directory exists
+        self._data_dir.mkdir(parents=True, exist_ok=True)
 
-        data_dir = ctx.args.get("data_dir")
-        self._list_runner = ListRunner(data_dir=data_dir)
+        self._list_runner = ListRunner(data_dir=self._data_dir)
 
         self._watcher = TrelloWatcher(
             trello_client=self._trello,
             prompt_builder=self._prompt_builder,
             config=self._config,
-            get_session_lock=self._get_session_lock,
-            data_dir=data_dir,
+            get_session_lock=_get_session_lock,
+            data_dir=self._data_dir,
             list_runner_ref=lambda: self._list_runner,
         )
         self._watcher.start()
@@ -154,7 +174,7 @@ class TrelloPlugin(Plugin):
         )
 
         # 4. Check restart pending
-        if self._restart_manager and self._restart_manager.is_pending:
+        if soulstream.is_restart_pending():
             try:
                 await slack.send_message(
                     channel=item_channel,
@@ -187,8 +207,6 @@ class TrelloPlugin(Plugin):
         session_id = soulstream.get_session_id(item_ts)
 
         # 9. Run compact + Claude in background thread
-        get_session_lock = self._get_session_lock
-
         def run_async_task():
             """Run async operations in new event loop."""
             loop = asyncio.new_event_loop()
@@ -201,7 +219,6 @@ class TrelloPlugin(Plugin):
                     start_msg_ts,
                     session_id,
                     prompt,
-                    get_session_lock,
                 ))
             finally:
                 loop.close()
@@ -218,22 +235,19 @@ class TrelloPlugin(Plugin):
         start_msg_ts: str,
         session_id: str | None,
         prompt: str,
-        get_session_lock,
     ):
         """Execute Claude with compact in async context."""
-        lock = None
-        if get_session_lock:
-            lock = get_session_lock(thread_ts)
-            if not lock.acquire(blocking=False):
-                try:
-                    await slack.update_message(
-                        channel=channel,
-                        ts=start_msg_ts,
-                        text="이전 요청을 처리 중이에요. 잠시 후 다시 시도해주세요.",
-                    )
-                except Exception:
-                    pass
-                return
+        lock = _get_session_lock(thread_ts)
+        if not lock.acquire(blocking=False):
+            try:
+                await slack.update_message(
+                    channel=channel,
+                    ts=start_msg_ts,
+                    text="이전 요청을 처리 중이에요. 잠시 후 다시 시도해주세요.",
+                )
+            except Exception:
+                pass
+            return
 
         try:
             # Compact if session exists
@@ -284,8 +298,7 @@ class TrelloPlugin(Plugin):
             except Exception:
                 pass
         finally:
-            if lock:
-                lock.release()
+            lock.release()
 
     async def _on_command(self, ctx: HookContext) -> tuple[HookResult, Any]:
         """Handle resume list-run command."""
