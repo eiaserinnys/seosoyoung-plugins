@@ -30,7 +30,6 @@ class ChannelDigestScheduler:
         observer: ChannelObserver,
         compressor: DigestCompressor | None,
         cooldown: InterventionHistory,
-        slack_client,
         channels: list[str],
         interval_sec: int = 300,
         buffer_threshold: int = 30000,
@@ -46,7 +45,6 @@ class ChannelDigestScheduler:
         self.observer = observer
         self.compressor = compressor
         self.cooldown = cooldown
-        self.slack_client = slack_client
         self.channels = channels
         self.interval_sec = interval_sec
         self.buffer_threshold = buffer_threshold
@@ -121,9 +119,6 @@ class ChannelDigestScheduler:
     def _run_pipeline(self, channel_id: str) -> None:
         """소화/판단 파이프라인을 실행합니다."""
         from seosoyoung_plugins.channel_observer.pipeline import run_channel_pipeline
-        from seosoyoung.slackbot.soulstream import get_claude_runner
-
-        runner = get_claude_runner()
 
         try:
             asyncio.run(
@@ -131,7 +126,6 @@ class ChannelDigestScheduler:
                     store=self.store,
                     observer=self.observer,
                     channel_id=channel_id,
-                    slack_client=self.slack_client,
                     cooldown=self.cooldown,
                     threshold_a=1,  # 주기적 트리거는 pending이 있으면 무조건 실행
                     threshold_b=self.buffer_threshold,
@@ -140,7 +134,6 @@ class ChannelDigestScheduler:
                     digest_target_tokens=self.digest_target_tokens,
                     debug_channel=self.debug_channel,
                     intervention_threshold=self.intervention_threshold,
-                    claude_runner=runner,
                     bot_user_id=self.bot_user_id,
                     mention_tracker=self.mention_tracker,
                 )

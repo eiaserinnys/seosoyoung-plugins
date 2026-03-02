@@ -8,6 +8,7 @@ environment variables.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from typing import Any
@@ -72,7 +73,6 @@ class ChannelObserverPlugin(Plugin):
         self._observer_engine = None
         self._compressor = None
         self._scheduler = None
-        self._slack_client = None
         self._mention_tracker = None
 
         logger.info(
@@ -106,7 +106,6 @@ class ChannelObserverPlugin(Plugin):
             logger.info("ChannelObserverPlugin: no channels configured")
             return HookResult.CONTINUE, None
 
-        self._slack_client = ctx.args.get("slack_client")
         self._mention_tracker = ctx.args.get("mention_tracker")
         self._bot_user_id = ctx.args.get("bot_user_id", "")
 
@@ -152,7 +151,6 @@ class ChannelObserverPlugin(Plugin):
                 observer=self._observer_engine,
                 compressor=self._compressor,
                 cooldown=self._cooldown,
-                slack_client=self._slack_client,
                 channels=self._channels,
                 interval_sec=self._periodic_sec,
                 buffer_threshold=self._buffer_threshold,
@@ -203,7 +201,6 @@ class ChannelObserverPlugin(Plugin):
             return HookResult.SKIP, None
 
         event = ctx.args.get("event", {})
-        client = ctx.args.get("client")
 
         channel = event.get("channel", "")
         if channel not in self._channels:
@@ -212,11 +209,11 @@ class ChannelObserverPlugin(Plugin):
         try:
             collected = self._collector.collect(event)
             if collected:
-                self._send_collect_log(client, channel, event)
+                self._send_collect_log(channel, event)
                 force = self._contains_trigger_word(
                     event.get("text", "")
                 )
-                self._maybe_trigger_digest(channel, client, force=force)
+                self._maybe_trigger_digest(channel, force=force)
         except Exception as e:
             logger.error(f"채널 메시지 수집 실패: {e}")
 
@@ -261,7 +258,7 @@ class ChannelObserverPlugin(Plugin):
         )
 
     def _maybe_trigger_digest(
-        self, channel_id: str, client: Any, *, force: bool = False
+        self, channel_id: str, *, force: bool = False
     ) -> None:
         """pending 토큰이 threshold_A 이상이면 파이프라인을 실행합니다."""
         if not all([self._store, self._observer_engine, self._cooldown]):
@@ -283,30 +280,31 @@ class ChannelObserverPlugin(Plugin):
                 from seosoyoung_plugins.channel_observer.pipeline import (
                     run_channel_pipeline,
                 )
-                from seosoyoung.slackbot.soulstream import get_claude_runner
-                from seosoyoung.utils.async_bridge import run_in_new_loop
 
-                runner = get_claude_runner()
+                # Create event loop for this thread
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
 
-                run_in_new_loop(
-                    run_channel_pipeline(
-                        store=self._store,
-                        observer=self._observer_engine,
-                        channel_id=channel_id,
-                        slack_client=client,
-                        cooldown=self._cooldown,
-                        threshold_a=threshold_a,
-                        threshold_b=self._threshold_b,
-                        compressor=self._compressor,
-                        digest_max_tokens=self._digest_max_tokens,
-                        digest_target_tokens=self._digest_target_tokens,
-                        debug_channel=self._debug_channel,
-                        intervention_threshold=self._intervention_threshold,
-                        claude_runner=runner,
-                        bot_user_id=self._bot_user_id,
-                        mention_tracker=self._mention_tracker,
+                try:
+                    loop.run_until_complete(
+                        run_channel_pipeline(
+                            store=self._store,
+                            observer=self._observer_engine,
+                            channel_id=channel_id,
+                            cooldown=self._cooldown,
+                            threshold_a=threshold_a,
+                            threshold_b=self._threshold_b,
+                            compressor=self._compressor,
+                            digest_max_tokens=self._digest_max_tokens,
+                            digest_target_tokens=self._digest_target_tokens,
+                            debug_channel=self._debug_channel,
+                            intervention_threshold=self._intervention_threshold,
+                            bot_user_id=self._bot_user_id,
+                            mention_tracker=self._mention_tracker,
+                        )
                     )
-                )
+                finally:
+                    loop.close()
             except Exception as e:
                 logger.error(
                     f"채널 파이프라인 실행 실패 ({channel_id}): {e}"
@@ -319,7 +317,7 @@ class ChannelObserverPlugin(Plugin):
         digest_thread.start()
 
     def _send_collect_log(
-        self, client: Any, channel_id: str, event: dict
+        self, channel_id: str, event: dict
     ) -> None:
         """수집 디버그 로그를 전송합니다."""
         if not self._debug_channel:
@@ -340,7 +338,6 @@ class ChannelObserverPlugin(Plugin):
                 else 0
             )
             send_collect_debug_log(
-                client=client,
                 debug_channel=self._debug_channel,
                 source_channel=channel_id,
                 buffer_tokens=buffer_tokens,

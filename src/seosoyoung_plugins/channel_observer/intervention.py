@@ -20,6 +20,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+from seosoyoung.plugin_sdk import slack
 from seosoyoung_plugins.channel_observer.observer import ChannelObserverResult, JudgeItem
 from seosoyoung_plugins.channel_observer.prompts import DisplayNameResolver
 
@@ -77,14 +78,12 @@ def parse_intervention_markup(result: ChannelObserverResult) -> list[Interventio
 
 
 async def execute_interventions(
-    client,
     channel_id: str,
     actions: list[InterventionAction],
 ) -> list[Optional[dict]]:
     """InterventionAction 리스트를 슬랙 API로 발송합니다.
 
     Args:
-        client: Slack WebClient
         channel_id: 대상 채널
         actions: 실행할 액션 리스트
 
@@ -97,25 +96,25 @@ async def execute_interventions(
         try:
             if action.type == "message":
                 if action.target == "channel":
-                    resp = client.chat_postMessage(
+                    result = await slack.send_message(
                         channel=channel_id,
                         text=action.content,
                     )
                 else:
-                    resp = client.chat_postMessage(
+                    result = await slack.send_message(
                         channel=channel_id,
                         text=action.content,
                         thread_ts=action.target,
                     )
-                results.append(resp)
+                results.append({"ok": result.ok, "ts": result.ts} if result.ok else None)
 
             elif action.type == "react":
-                resp = client.reactions_add(
+                result = await slack.add_reaction(
                     channel=channel_id,
-                    timestamp=action.target,
-                    name=action.content,
+                    ts=action.target,
+                    emoji=action.content,
                 )
-                results.append(resp)
+                results.append({"ok": result.ok} if result.ok else None)
 
             else:
                 logger.warning(f"알 수 없는 액션 타입: {action.type}")
@@ -358,7 +357,6 @@ def _build_fields_blocks(fields: list[tuple[str, str]]) -> list[dict]:
 
 
 async def send_debug_log(
-    client,
     debug_channel: str,
     source_channel: str,
     observer_result: ChannelObserverResult,
@@ -414,13 +412,12 @@ async def send_debug_log(
     )
 
     try:
-        client.chat_postMessage(channel=debug_channel, blocks=blocks, text=fallback)
+        await slack.send_message(channel=debug_channel, blocks=blocks, text=fallback)
     except Exception as e:
         logger.error(f"디버그 로그 전송 실패: {e}")
 
 
-def send_collect_debug_log(
-    client,
+async def send_collect_debug_log(
     debug_channel: str,
     source_channel: str,
     buffer_tokens: int,
@@ -459,13 +456,12 @@ def send_collect_debug_log(
     fallback = f"[채널 수집] {source_channel} | {location} | {ratio} tok"
 
     try:
-        client.chat_postMessage(channel=debug_channel, blocks=blocks, text=fallback)
+        await slack.send_message(channel=debug_channel, blocks=blocks, text=fallback)
     except Exception as e:
         logger.error(f"수집 디버그 로그 전송 실패: {e}")
 
 
-def send_digest_skip_debug_log(
-    client,
+async def send_digest_skip_debug_log(
     debug_channel: str,
     source_channel: str,
     buffer_tokens: int,
@@ -490,13 +486,12 @@ def send_digest_skip_debug_log(
     fallback = f"[소화 스킵] {source_channel} | 버퍼 {buffer_tokens} tok < 임계치 {threshold} tok"
 
     try:
-        client.chat_postMessage(channel=debug_channel, blocks=blocks, text=fallback)
+        await slack.send_message(channel=debug_channel, blocks=blocks, text=fallback)
     except Exception as e:
         logger.error(f"소화 스킵 디버그 로그 전송 실패: {e}")
 
 
-def send_intervention_probability_debug_log(
-    client,
+async def send_intervention_probability_debug_log(
     debug_channel: str,
     source_channel: str,
     importance: int,
@@ -535,13 +530,12 @@ def send_intervention_probability_debug_log(
     )
 
     try:
-        client.chat_postMessage(channel=debug_channel, blocks=blocks, text=fallback)
+        await slack.send_message(channel=debug_channel, blocks=blocks, text=fallback)
     except Exception as e:
         logger.error(f"개입 확률 디버그 로그 전송 실패: {e}")
 
 
-def send_multi_judge_debug_log(
-    client,
+async def send_multi_judge_debug_log(
     debug_channel: str,
     source_channel: str,
     items: list[JudgeItem],
@@ -692,6 +686,6 @@ def send_multi_judge_debug_log(
     )
 
     try:
-        client.chat_postMessage(channel=debug_channel, blocks=blocks, text=fallback)
+        await slack.send_message(channel=debug_channel, blocks=blocks, text=fallback)
     except Exception as e:
         logger.error(f"복수 판단 디버그 로그 전송 실패: {e}")

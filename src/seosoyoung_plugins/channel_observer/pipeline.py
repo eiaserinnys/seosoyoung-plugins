@@ -13,6 +13,7 @@ import math
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from seosoyoung.plugin_sdk import slack, soulstream
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
     InterventionHistory,
@@ -267,7 +268,6 @@ async def run_channel_pipeline(
     store: ChannelStore,
     observer: ChannelObserver,
     channel_id: str,
-    slack_client,
     cooldown: InterventionHistory,
     threshold_a: int = 150,
     threshold_b: int = 5000,
@@ -411,7 +411,7 @@ async def run_channel_pipeline(
         pending_messages=judge_pending,
         thread_buffers=judge_thread_buffers,
         bot_user_id=bot_user_id,
-        slack_client=slack_client,
+        
     )
 
     if judge_result is None:
@@ -447,7 +447,7 @@ async def run_channel_pipeline(
                 judge_result=judge_result,
                 store=store,
                 channel_id=channel_id,
-                slack_client=slack_client,
+                
                 cooldown=cooldown,
                 pending_messages=judge_pending,
                 current_digest=current_digest,
@@ -466,7 +466,7 @@ async def run_channel_pipeline(
                 judge_result=judge_result,
                 store=store,
                 channel_id=channel_id,
-                slack_client=slack_client,
+                
                 cooldown=cooldown,
                 pending_messages=judge_pending,
                 current_digest=current_digest,
@@ -517,7 +517,7 @@ async def _handle_multi_judge(
 
     # 이모지 리액션 일괄 실행
     if react_actions:
-        await execute_interventions(slack_client, channel_id, react_actions)
+        await execute_interventions(channel_id, react_actions)
 
     # 개입 처리 (burst/cooldown 확률 기반)
     executed_messages: list[InterventionAction] = []
@@ -546,7 +546,7 @@ async def _handle_multi_judge(
             freq_factor = importance_for_prob / 10.0
 
         send_intervention_probability_debug_log(
-            client=slack_client,
+            
             debug_channel=debug_channel,
             source_channel=channel_id,
             importance=importance_for_prob,
@@ -576,13 +576,13 @@ async def _handle_multi_judge(
                         await _execute_intervene(
                             store=store,
                             channel_id=channel_id,
-                            slack_client=slack_client,
+                            
                             action=action,
                             pending_messages=pending_messages,
                             observer_reason=intervene_item.reaction_content,
                             llm_call=llm_call,
                             bot_user_id=bot_user_id,
-                            session_manager=session_manager,
+                            
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
                         )
@@ -595,7 +595,7 @@ async def _handle_multi_judge(
 
     # 디버그 로그: 메시지별 독립 블록
     send_multi_judge_debug_log(
-        client=slack_client,
+        
         debug_channel=debug_channel,
         source_channel=channel_id,
         items=judge_result.items,
@@ -603,7 +603,7 @@ async def _handle_multi_judge(
         message_actions_executed=executed_messages,
         pending_count=len(pending_messages),
         pending_messages=pending_messages,
-        slack_client=slack_client,
+        
     )
 
 
@@ -648,7 +648,7 @@ async def _handle_single_judge(
     actions = _filter_mention_thread_actions(actions, mention_handled_ts or set())
     if not actions:
         await send_debug_log(
-            client=slack_client,
+            
             debug_channel=debug_channel,
             source_channel=channel_id,
             observer_result=observer_result,
@@ -669,7 +669,7 @@ async def _handle_single_judge(
         )
 
         if react_actions:
-            await execute_interventions(slack_client, channel_id, react_actions)
+            await execute_interventions(channel_id, react_actions)
 
         executed_messages: list[InterventionAction] = []
         if message_actions:
@@ -690,7 +690,7 @@ async def _handle_single_judge(
                 freq_factor = judge_result.importance / 10.0
 
             send_intervention_probability_debug_log(
-                client=slack_client,
+                
                 debug_channel=debug_channel,
                 source_channel=channel_id,
                 importance=judge_result.importance,
@@ -708,13 +708,13 @@ async def _handle_single_judge(
                         await _execute_intervene(
                             store=store,
                             channel_id=channel_id,
-                            slack_client=slack_client,
+                            
                             action=action,
                             pending_messages=pending_messages,
                             observer_reason=judge_result.reaction_content,
                             llm_call=llm_call,
                             bot_user_id=bot_user_id,
-                            session_manager=session_manager,
+                            
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
                         )
@@ -728,7 +728,7 @@ async def _handle_single_judge(
         filtered = react_actions + executed_messages
 
         await send_debug_log(
-            client=slack_client,
+            
             debug_channel=debug_channel,
             source_channel=channel_id,
             observer_result=observer_result,
@@ -744,13 +744,11 @@ async def _handle_single_judge(
 async def _execute_intervene(
     store: ChannelStore,
     channel_id: str,
-    slack_client,
     action: InterventionAction,
     pending_messages: list[dict],
     observer_reason: str | None = None,
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
-    session_manager=None,
     thread_buffers: dict[str, list[dict]] | None = None,
     **kwargs,
 ) -> None:
@@ -759,8 +757,8 @@ async def _execute_intervene(
     reaction_ts = action.target if action.target and action.target != "channel" else None
     if reaction_ts:
         try:
-            slack_client.reactions_add(
-                channel=channel_id, timestamp=reaction_ts, name="ssy-thinking",
+            await slack.add_reaction(
+                channel=channel_id, ts=reaction_ts, emoji="ssy-thinking",
             )
         except Exception as e:
             logger.debug(f"ssy-thinking 이모지 추가 실패: {e}")
@@ -809,7 +807,7 @@ async def _execute_intervene(
                 f"intervene 스킵: target_ts={target_ts}를 "
                 f"pending/thread_buffers/judged 어디에서도 찾을 수 없음 ({channel_id})"
             )
-            _remove_thinking_reaction(slack_client, channel_id, reaction_ts)
+            _remove_thinking_reaction(channel_id, reaction_ts)
             return
 
     if trigger_message is None and pending_messages:
@@ -825,7 +823,7 @@ async def _execute_intervene(
         trigger_message=trigger_message,
         target=action.target or "channel",
         observer_reason=observer_reason,
-        slack_client=slack_client,
+        
         thread_buffers=thread_buffers,
     )
 
@@ -838,38 +836,34 @@ async def _execute_intervene(
             )
         else:
             logger.warning(f"intervene: llm_call이 없음 ({channel_id})")
-            _remove_thinking_reaction(slack_client, channel_id, reaction_ts)
+            _remove_thinking_reaction(channel_id, reaction_ts)
             return
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")
-        _remove_thinking_reaction(slack_client, channel_id, reaction_ts)
+        _remove_thinking_reaction(channel_id, reaction_ts)
         return
 
     if not response_text or not response_text.strip():
         logger.warning(f"intervene 빈 응답 ({channel_id})")
-        _remove_thinking_reaction(slack_client, channel_id, reaction_ts)
+        _remove_thinking_reaction(channel_id, reaction_ts)
         return
 
     # 5. 슬랙 발송 + 봇 응답 ts를 judged에 기록
     try:
         if action.target == "channel":
-            resp = slack_client.chat_postMessage(
+            result = await slack.send_message(
                 channel=channel_id,
                 text=response_text.strip(),
             )
         else:
-            resp = slack_client.chat_postMessage(
+            result = await slack.send_message(
                 channel=channel_id,
                 text=response_text.strip(),
                 thread_ts=action.target,
             )
 
         # 봇 응답을 judged에 기록하여 후속 judge에서 맥락으로 사용
-        resp_ts = None
-        if isinstance(resp, dict):
-            resp_ts = resp.get("ts")
-        elif hasattr(resp, "data"):
-            resp_ts = resp.data.get("ts")
+        resp_ts = result.ts if result.ok else None
 
         if resp_ts:
             bot_msg = {
@@ -881,7 +875,7 @@ async def _execute_intervene(
             logger.info(f"봇 응답 judged 기록 ({channel_id}): ts={resp_ts}")
 
             # 스레드 대상 개입이면 세션 생성 (후속 멘션 대화 대비)
-            # dispatch 콜백이 전달된 경우 훅으로 요청, 아니면 session_manager 직접 호출
+            # dispatch 콜백이 전달된 경우 훅으로 요청
             if action.target != "channel":
                 dispatch = kwargs.get("dispatch")
                 if dispatch:
@@ -901,44 +895,34 @@ async def _execute_intervene(
                         logger.info(f"세션 생성 훅 디스패치 ({channel_id}): ts={resp_ts}")
                     except Exception as e:
                         logger.error(f"세션 생성 훅 디스패치 실패 ({channel_id}): {e}")
-                elif session_manager:
-                    try:
-                        session_manager.create(
-                            thread_ts=resp_ts,
-                            channel_id=channel_id,
-                            source_type="hybrid",
-                        )
-                        logger.info(f"개입 세션 생성 ({channel_id}): ts={resp_ts}")
-                    except Exception as e:
-                        logger.error(f"개입 세션 생성 실패 ({channel_id}): {e}")
 
         # 발송 성공: :ssy-thinking: → :ssy-happy: 교체
-        _swap_thinking_to_happy(slack_client, channel_id, reaction_ts)
+        await _swap_thinking_to_happy(channel_id, reaction_ts)
 
     except Exception as e:
         logger.error(f"intervene 슬랙 발송 실패 ({channel_id}): {e}")
-        _remove_thinking_reaction(slack_client, channel_id, reaction_ts)
+        await _remove_thinking_reaction(channel_id, reaction_ts)
 
 
-def _remove_thinking_reaction(client, channel_id: str, ts: str | None) -> None:
+async def _remove_thinking_reaction(channel_id: str, ts: str | None) -> None:
     """트리거 메시지에서 :ssy-thinking: 이모지를 제거합니다."""
     if not ts:
         return
     try:
-        client.reactions_remove(channel=channel_id, timestamp=ts, name="ssy-thinking")
+        await slack.remove_reaction(channel=channel_id, ts=ts, emoji="ssy-thinking")
     except Exception:
         pass
 
 
-def _swap_thinking_to_happy(client, channel_id: str, ts: str | None) -> None:
+async def _swap_thinking_to_happy(channel_id: str, ts: str | None) -> None:
     """:ssy-thinking: 이모지를 :ssy-happy:로 교체합니다."""
     if not ts:
         return
     try:
-        client.reactions_remove(channel=channel_id, timestamp=ts, name="ssy-thinking")
+        await slack.remove_reaction(channel=channel_id, ts=ts, emoji="ssy-thinking")
     except Exception:
         pass
     try:
-        client.reactions_add(channel=channel_id, timestamp=ts, name="ssy-happy")
+        await slack.add_reaction(channel=channel_id, ts=ts, emoji="ssy-happy")
     except Exception as e:
         logger.debug(f"ssy-happy 이모지 추가 실패: {e}")
