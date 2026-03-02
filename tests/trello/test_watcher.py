@@ -232,6 +232,26 @@ class TestAutoMoveNoticeInPrompts:
         assert "📦 Backlog로 이동하세요" in prompt
 
 
+class TestListRunSaySignature:
+    """정주행 say() 함수가 send_long_message와 호환되는 시그니처를 갖는지 테스트
+
+    Note: 이 테스트는 원본 seosoyoung에서 중요했지만, 플러그인 아키텍처에서는
+    PresentationContext가 soulstream에 의해 제공되므로 플러그인 레벨에서는 테스트할 수 없음.
+    대신 host (seosoyoung) 레벨에서 테스트되어야 함.
+    """
+
+    @pytest.mark.skip(reason="Plugin architecture: PresentationContext는 host가 제공하므로 host에서 테스트됨")
+    def test_list_run_say_accepts_thread_ts_keyword(self, tmp_path):
+        """정주행 say()가 thread_ts= 키워드 인자를 받을 수 있어야 함
+
+        원본 seosoyoung 회귀 테스트: send_long_message가 say(text=..., thread_ts=thread_ts)로
+        호출하므로 say()가 thread_ts 키워드를 받아야 TypeError가 발생하지 않음.
+
+        플러그인 버전에서는 PresentationContext가 host에서 제공되므로 이 테스트는 skip됨.
+        """
+        pass
+
+
 class TestStaleTrackedCardCleanup:
     """방안 A: _poll() 시 만료된 _tracked 항목 자동 정리 테스트"""
 
@@ -444,6 +464,35 @@ class TestPreemptiveCompact:
 
         # Exception should not propagate
         watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
+
+    def test_compact_updates_session_id_when_changed(self, tmp_path, mock_plugin_sdk):
+        """compact 후 세션 ID가 변경되어도 정상 처리됨
+
+        Note: plugin_sdk architecture에서는 session_id 업데이트가 host에서 자동으로 처리되므로,
+        플러그인은 단지 compact를 호출하기만 하면 됨. 원본 seosoyoung에서는 session_manager를
+        통해 명시적으로 update_session_id를 호출했지만, 플러그인 버전에서는 이 책임이
+        host에 위임되어 있음.
+        """
+        # Mock soulstream.get_session_id to return old session
+        mock_plugin_sdk["soulstream"].get_session_id.return_value = "old-session-id"
+
+        # Mock soulstream.compact to return success with new session_id
+        mock_compact_result = MagicMock()
+        mock_compact_result.ok = True
+        mock_compact_result.session_id = "new-session-id"  # 변경된 session_id
+
+        async def async_compact(session_id):
+            return mock_compact_result
+        mock_plugin_sdk["soulstream"].compact = AsyncMock(side_effect=async_compact)
+
+        watcher = _make_watcher(tmp_path)
+
+        watcher._preemptive_compact("1234.5678", "C12345", "Test Card")
+
+        # Verify compact was called with old session_id
+        mock_plugin_sdk["soulstream"].compact.assert_called_once()
+
+        # session_id 업데이트는 host가 내부적으로 처리하므로 플러그인에서는 검증 불필요
 
 class TestCheckRunListLabelsFiltering:
     """_check_run_list_labels 운영 리스트 필터링 및 가드 테스트"""

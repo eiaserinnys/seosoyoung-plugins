@@ -488,7 +488,6 @@ async def _handle_multi_judge(
     judge_result: JudgeResult,
     store: ChannelStore,
     channel_id: str,
-    slack_client,
     cooldown: InterventionHistory,
     pending_messages: list[dict],
     current_digest: str | None,
@@ -545,8 +544,7 @@ async def _handle_multi_judge(
             time_factor = prob
             freq_factor = importance_for_prob / 10.0
 
-        send_intervention_probability_debug_log(
-            
+        await send_intervention_probability_debug_log(
             debug_channel=debug_channel,
             source_channel=channel_id,
             importance=importance_for_prob,
@@ -576,26 +574,24 @@ async def _handle_multi_judge(
                         await _execute_intervene(
                             store=store,
                             channel_id=channel_id,
-                            
+
                             action=action,
                             pending_messages=pending_messages,
                             observer_reason=intervene_item.reaction_content,
                             llm_call=llm_call,
                             bot_user_id=bot_user_id,
-                            
+
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
+                            session_manager=session_manager,
                         )
                     else:
-                        await execute_interventions(
-                            slack_client, channel_id, [action]
-                        )
+                        await execute_interventions(channel_id, [action])
                     cooldown.record(channel_id)
                     executed_messages = [action]
 
     # 디버그 로그: 메시지별 독립 블록
-    send_multi_judge_debug_log(
-        
+    await send_multi_judge_debug_log(
         debug_channel=debug_channel,
         source_channel=channel_id,
         items=judge_result.items,
@@ -603,7 +599,7 @@ async def _handle_multi_judge(
         message_actions_executed=executed_messages,
         pending_count=len(pending_messages),
         pending_messages=pending_messages,
-        
+
     )
 
 
@@ -611,7 +607,6 @@ async def _handle_single_judge(
     judge_result: JudgeResult,
     store: ChannelStore,
     channel_id: str,
-    slack_client,
     cooldown: InterventionHistory,
     pending_messages: list[dict],
     current_digest: str | None,
@@ -689,8 +684,7 @@ async def _handle_single_judge(
                 time_factor = prob
                 freq_factor = judge_result.importance / 10.0
 
-            send_intervention_probability_debug_log(
-                
+            await send_intervention_probability_debug_log(
                 debug_channel=debug_channel,
                 source_channel=channel_id,
                 importance=judge_result.importance,
@@ -708,20 +702,19 @@ async def _handle_single_judge(
                         await _execute_intervene(
                             store=store,
                             channel_id=channel_id,
-                            
+
                             action=action,
                             pending_messages=pending_messages,
                             observer_reason=judge_result.reaction_content,
                             llm_call=llm_call,
                             bot_user_id=bot_user_id,
-                            
+
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
+                            session_manager=session_manager,
                         )
                 else:
-                    await execute_interventions(
-                        slack_client, channel_id, message_actions
-                    )
+                    await execute_interventions(channel_id, message_actions)
                 cooldown.record(channel_id)
                 executed_messages = message_actions
 
@@ -875,9 +868,10 @@ async def _execute_intervene(
             logger.info(f"봇 응답 judged 기록 ({channel_id}): ts={resp_ts}")
 
             # 스레드 대상 개입이면 세션 생성 (후속 멘션 대화 대비)
-            # dispatch 콜백이 전달된 경우 훅으로 요청
+            # dispatch 콜백이 전달된 경우 훅으로 요청, 아니면 session_manager 직접 호출
             if action.target != "channel":
                 dispatch = kwargs.get("dispatch")
+                session_manager = kwargs.get("session_manager")
                 if dispatch:
                     try:
                         from seosoyoung.plugin_sdk import HookContext
@@ -895,6 +889,16 @@ async def _execute_intervene(
                         logger.info(f"세션 생성 훅 디스패치 ({channel_id}): ts={resp_ts}")
                     except Exception as e:
                         logger.error(f"세션 생성 훅 디스패치 실패 ({channel_id}): {e}")
+                elif session_manager:
+                    try:
+                        session_manager.create(
+                            thread_ts=resp_ts,
+                            channel_id=channel_id,
+                            source_type="hybrid",
+                        )
+                        logger.info(f"개입 세션 생성 ({channel_id}): ts={resp_ts}")
+                    except Exception as e:
+                        logger.error(f"개입 세션 생성 실패 ({channel_id}): {e}")
 
         # 발송 성공: :ssy-thinking: → :ssy-happy: 교체
         await _swap_thinking_to_happy(channel_id, reaction_ts)

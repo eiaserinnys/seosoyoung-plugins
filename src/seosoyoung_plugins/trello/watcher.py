@@ -666,6 +666,7 @@ class TrelloWatcher:
 
             if result.ok:
                 logger.info(f"선제적 컴팩트 완료: card={card_name}")
+                # Note: session_id 업데이트는 host에서 자동으로 처리됨
             else:
                 logger.warning(f"선제적 컴팩트 실패: card={card_name}, error={result.error}")
         except Exception as e:

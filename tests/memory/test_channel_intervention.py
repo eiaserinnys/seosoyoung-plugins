@@ -119,15 +119,12 @@ class TestExecuteInterventions:
     """슬랙 API 발송 로직 테스트"""
 
     @pytest.mark.asyncio
-    async def test_send_channel_message(self):
-        """target=channel → chat_postMessage(channel=ch)"""
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
+    async def test_send_channel_message(self, mock_plugin_sdk):
+        """target=channel → send_message(channel=ch)"""
         actions = [InterventionAction(type="message", target="channel", content="안녕")]
-        results = await execute_interventions(client, "C123", actions)
+        results = await execute_interventions("C123", actions)
 
-        client.chat_postMessage.assert_called_once_with(
+        mock_plugin_sdk["slack"].send_message.assert_called_once_with(
             channel="C123",
             text="안녕",
         )
@@ -135,51 +132,47 @@ class TestExecuteInterventions:
         assert results[0]["ok"] is True
 
     @pytest.mark.asyncio
-    async def test_send_thread_message(self):
-        """target=thread_ts → chat_postMessage(channel=ch, thread_ts=ts)"""
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
+    async def test_send_thread_message(self, mock_plugin_sdk):
+        """target=thread_ts → send_message(channel=ch, thread_ts=ts)"""
         actions = [
             InterventionAction(type="message", target="1234.5678", content="답글")
         ]
-        results = await execute_interventions(client, "C123", actions)
+        results = await execute_interventions("C123", actions)
 
-        client.chat_postMessage.assert_called_once_with(
+        mock_plugin_sdk["slack"].send_message.assert_called_once_with(
             channel="C123",
             text="답글",
             thread_ts="1234.5678",
         )
+        assert len(results) == 1
+        assert results[0]["ok"] is True
 
     @pytest.mark.asyncio
-    async def test_send_reaction(self):
-        """type=react → reactions_add"""
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-
+    async def test_send_reaction(self, mock_plugin_sdk):
+        """type=react → add_reaction"""
         actions = [
             InterventionAction(type="react", target="1234.5678", content="laughing")
         ]
-        results = await execute_interventions(client, "C123", actions)
+        results = await execute_interventions("C123", actions)
 
-        client.reactions_add.assert_called_once_with(
+        mock_plugin_sdk["slack"].add_reaction.assert_called_once_with(
             channel="C123",
-            timestamp="1234.5678",
-            name="laughing",
+            ts="1234.5678",
+            emoji="laughing",
         )
+        assert len(results) == 1
+        assert results[0]["ok"] is True
 
     @pytest.mark.asyncio
-    async def test_api_error_is_caught(self):
+    async def test_api_error_is_caught(self, mock_plugin_sdk):
         """API 호출 실패 시 에러가 잡히고 나머지 액션은 계속 실행"""
-        client = MagicMock()
-        client.reactions_add = MagicMock(side_effect=Exception("API error"))
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
+        mock_plugin_sdk["slack"].add_reaction.side_effect = Exception("API error")
 
         actions = [
             InterventionAction(type="react", target="1.1", content="smile"),
             InterventionAction(type="message", target="channel", content="메시지"),
         ]
-        results = await execute_interventions(client, "C123", actions)
+        results = await execute_interventions("C123", actions)
 
         # 첫 번째 실패, 두 번째 성공
         assert len(results) == 2
@@ -187,10 +180,9 @@ class TestExecuteInterventions:
         assert results[1]["ok"] is True
 
     @pytest.mark.asyncio
-    async def test_empty_actions(self):
+    async def test_empty_actions(self, mock_plugin_sdk):
         """빈 액션 리스트는 아무것도 하지 않음"""
-        client = MagicMock()
-        results = await execute_interventions(client, "C123", [])
+        results = await execute_interventions("C123", [])
         assert results == []
 
 
@@ -473,9 +465,8 @@ class TestSendDebugLog:
     """디버그 로그 발송 테스트"""
 
     @pytest.mark.asyncio
-    async def test_sends_to_debug_channel_with_blocks(self):
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
+    async def test_sends_to_debug_channel_with_blocks(self, mock_plugin_sdk):
+        mock_plugin_sdk["slack"].send_message.return_value = {"ok": True}
 
         result = ChannelObserverResult(
             digest="관찰 내용",
@@ -489,7 +480,6 @@ class TestSendDebugLog:
         ]
 
         await send_debug_log(
-            client=client,
             debug_channel="C_DEBUG",
             source_channel="C123",
             observer_result=result,
@@ -497,8 +487,8 @@ class TestSendDebugLog:
             actions_filtered=[],
         )
 
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert call_kwargs["channel"] == "C_DEBUG"
         # Block Kit blocks 파라미터 존재 확인
         assert "blocks" in call_kwargs
@@ -512,17 +502,15 @@ class TestSendDebugLog:
         assert "7" in blocks_str
 
     @pytest.mark.asyncio
-    async def test_includes_emotion_and_reasoning(self):
+    async def test_includes_emotion_and_reasoning(self, mock_plugin_sdk):
         """감정과 판단 이유가 블록에 포함"""
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
+        mock_plugin_sdk["slack"].send_message.return_value = {"ok": True}
 
         result = ChannelObserverResult(
             digest="test", importance=5, reaction_type="none",
         )
 
         await send_debug_log(
-            client=client,
             debug_channel="C_DEBUG",
             source_channel="C123",
             observer_result=result,
@@ -532,19 +520,17 @@ class TestSendDebugLog:
             emotion="관심",
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "관심" in blocks_str
         assert "흥미로운" in blocks_str
 
     @pytest.mark.asyncio
-    async def test_skips_when_no_debug_channel(self):
+    async def test_skips_when_no_debug_channel(self, mock_plugin_sdk):
         """디버그 채널이 없으면 아무것도 안 함"""
-        client = MagicMock()
         result = ChannelObserverResult(digest="test", importance=0, reaction_type="none")
 
         await send_debug_log(
-            client=client,
             debug_channel="",
             source_channel="C123",
             observer_result=result,
@@ -552,7 +538,7 @@ class TestSendDebugLog:
             actions_filtered=[],
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
 
 # ── send_intervention_probability_debug_log 테스트 ────────
@@ -560,12 +546,10 @@ class TestSendDebugLog:
 class TestSendInterventionProbabilityDebugLog:
     """확률 판단 디버그 로그 테스트"""
 
-    def test_sends_passed_log_with_blocks(self):
+    @pytest.mark.asyncio
+    async def test_sends_passed_log_with_blocks(self, mock_plugin_sdk):
         """통과 시 Block Kit 로그"""
-        client = MagicMock()
-
-        send_intervention_probability_debug_log(
-            client=client,
+        await send_intervention_probability_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             importance=8,
@@ -577,19 +561,17 @@ class TestSendInterventionProbabilityDebugLog:
             passed=True,
         )
 
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert "blocks" in call_kwargs
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "C123" in blocks_str
         assert "8/10" in blocks_str
 
-    def test_sends_blocked_log_with_blocks(self):
+    @pytest.mark.asyncio
+    async def test_sends_blocked_log_with_blocks(self, mock_plugin_sdk):
         """차단 시 Block Kit 로그"""
-        client = MagicMock()
-
-        send_intervention_probability_debug_log(
-            client=client,
+        await send_intervention_probability_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             importance=3,
@@ -601,15 +583,13 @@ class TestSendInterventionProbabilityDebugLog:
             passed=False,
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert "blocks" in call_kwargs
 
-    def test_skips_when_no_debug_channel(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_no_debug_channel(self, mock_plugin_sdk):
         """디버그 채널 미설정이면 전송 안 함"""
-        client = MagicMock()
-
-        send_intervention_probability_debug_log(
-            client=client,
+        await send_intervention_probability_debug_log(
             debug_channel="",
             source_channel="C123",
             importance=5,
@@ -621,7 +601,7 @@ class TestSendInterventionProbabilityDebugLog:
             passed=False,
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
 
 # ── run_channel_pipeline 통합 테스트 ─────────────────
@@ -665,7 +645,7 @@ class TestRunChannelPipeline:
     """소화/판단 분리 파이프라인 통합 테스트"""
 
     @pytest.mark.asyncio
-    async def test_intervene_sends_message_via_llm(self, tmp_path):
+    async def test_intervene_sends_message_via_llm(self, tmp_path, mock_plugin_sdk):
         """판단 → 개입 → LLM 호출 → 슬랙 메시지 발송 흐름"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -678,9 +658,6 @@ class TestRunChannelPipeline:
             reaction_content="아이고, 무슨 소동이오?",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         async def mock_llm_call(system_prompt, user_prompt):
             return "이런 일이 벌어지다니, 놀랍구려."
 
@@ -688,21 +665,20 @@ class TestRunChannelPipeline:
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,  # 항상 통과
             llm_call=mock_llm_call,
         )
 
-        client.chat_postMessage.assert_called()
-        call_args_list = client.chat_postMessage.call_args_list
+        mock_plugin_sdk["slack"].send_message.assert_called()
+        call_args_list = mock_plugin_sdk["slack"].send_message.call_args_list
         sent_texts = [c[1]["text"] for c in call_args_list]
         # LLM 생성 응답이 발송됨
         assert any("놀랍구려" in t for t in sent_texts)
 
     @pytest.mark.asyncio
-    async def test_intervene_fallback_without_llm(self, tmp_path):
+    async def test_intervene_fallback_without_llm(self, tmp_path, mock_plugin_sdk):
         """llm_call 없으면 직접 발송 (폴백)"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -715,27 +691,23 @@ class TestRunChannelPipeline:
             reaction_content="아이고, 무슨 소동이오?",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
             # llm_call 없음 → 폴백
         )
 
-        client.chat_postMessage.assert_called()
-        call_args_list = client.chat_postMessage.call_args_list
+        mock_plugin_sdk["slack"].send_message.assert_called()
+        call_args_list = mock_plugin_sdk["slack"].send_message.call_args_list
         sent_texts = [c[1]["text"] for c in call_args_list]
         assert any("무슨 소동" in t for t in sent_texts)
 
     @pytest.mark.asyncio
-    async def test_react_sends_emoji(self, tmp_path):
+    async def test_react_sends_emoji(self, tmp_path, mock_plugin_sdk):
         """판단 → 이모지 리액션 발송 흐름"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -748,26 +720,22 @@ class TestRunChannelPipeline:
             reaction_content="laughing",
         ))
 
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
-        client.reactions_add.assert_called_once_with(
+        mock_plugin_sdk["slack"].add_reaction.assert_called_once_with(
             channel="C123",
-            timestamp="1001.000",
-            name="laughing",
+            ts="1001.000",
+            emoji="laughing",
         )
 
     @pytest.mark.asyncio
-    async def test_probability_blocks_at_burst_ceiling(self, tmp_path):
+    async def test_probability_blocks_at_burst_ceiling(self, tmp_path, mock_plugin_sdk):
         """burst 상한(7턴) 도달 시 메시지 개입이 차단됨"""
         import time as _time
         store = ChannelStore(base_dir=tmp_path)
@@ -788,9 +756,6 @@ class TestRunChannelPipeline:
             reaction_content="개입 메시지",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         async def mock_llm_call(system_prompt, user_prompt):
             return "LLM 응답"
 
@@ -798,7 +763,6 @@ class TestRunChannelPipeline:
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.5,
@@ -807,13 +771,13 @@ class TestRunChannelPipeline:
 
         # burst 상한 → 채널에 메시지 발송 없음 (디버그 로그는 제외)
         channel_calls = [
-            c for c in client.chat_postMessage.call_args_list
+            c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == "C123"
         ]
         assert len(channel_calls) == 0
 
     @pytest.mark.asyncio
-    async def test_high_importance_passes(self, tmp_path):
+    async def test_high_importance_passes(self, tmp_path, mock_plugin_sdk):
         """높은 중요도 + 충분한 시간 경과면 개입 통과"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -827,9 +791,6 @@ class TestRunChannelPipeline:
             reaction_content="중요한 대화",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         async def mock_llm_call(system_prompt, user_prompt):
             return "중요한 응답입니다."
 
@@ -837,7 +798,6 @@ class TestRunChannelPipeline:
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.3,
@@ -846,14 +806,14 @@ class TestRunChannelPipeline:
 
         # LLM 응답이 채널에 발송됨
         channel_calls = [
-            c for c in client.chat_postMessage.call_args_list
+            c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == "C123"
         ]
         assert len(channel_calls) >= 1
         assert any("중요한 응답" in c[1]["text"] for c in channel_calls)
 
     @pytest.mark.asyncio
-    async def test_intervene_records_history(self, tmp_path):
+    async def test_intervene_records_history(self, tmp_path, mock_plugin_sdk):
         """개입 성공 후 이력이 기록됨"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -866,9 +826,6 @@ class TestRunChannelPipeline:
             reaction_content="개입",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         async def mock_llm_call(system_prompt, user_prompt):
             return "응답"
 
@@ -878,7 +835,6 @@ class TestRunChannelPipeline:
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -888,7 +844,7 @@ class TestRunChannelPipeline:
         assert history.recent_count("C123") == 1
 
     @pytest.mark.asyncio
-    async def test_no_reaction_skips_intervention(self, tmp_path):
+    async def test_no_reaction_skips_intervention(self, tmp_path, mock_plugin_sdk):
         """반응이 none이면 개입 없음"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -899,22 +855,19 @@ class TestRunChannelPipeline:
             reaction_type="none",
         ))
 
-        client = MagicMock()
-
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
-        client.chat_postMessage.assert_not_called()
-        client.reactions_add.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
+        mock_plugin_sdk["slack"].add_reaction.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_debug_log_sent(self, tmp_path):
+    async def test_debug_log_sent(self, tmp_path, mock_plugin_sdk):
         """디버그 채널이 설정되면 로그 전송"""
         store = ChannelStore(base_dir=tmp_path)
         history = InterventionHistory(base_dir=tmp_path)
@@ -925,22 +878,18 @@ class TestRunChannelPipeline:
             reaction_type="none",
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id="C123",
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             debug_channel="C_DEBUG",
         )
 
         # 디버그 로그가 전송됨
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert call_kwargs["channel"] == "C_DEBUG"
 
 
@@ -949,12 +898,10 @@ class TestRunChannelPipeline:
 class TestSendCollectDebugLog:
     """메시지 수집 디버그 로그"""
 
-    def test_sends_log_with_blocks(self):
+    @pytest.mark.asyncio
+    async def test_sends_log_with_blocks(self, mock_plugin_sdk):
         """수집 시 Block Kit 로그 전송"""
-        client = MagicMock()
-
-        send_collect_debug_log(
-            client=client,
+        await send_collect_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             buffer_tokens=200,
@@ -963,20 +910,18 @@ class TestSendCollectDebugLog:
             user="U001",
         )
 
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert "blocks" in call_kwargs
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "C123" in blocks_str
         assert "200/500" in blocks_str
         assert "안녕하세요" in blocks_str
 
-    def test_shows_trigger_when_threshold_reached(self):
+    @pytest.mark.asyncio
+    async def test_shows_trigger_when_threshold_reached(self, mock_plugin_sdk):
         """임계치 도달 시 소화 트리거 표시"""
-        client = MagicMock()
-
-        send_collect_debug_log(
-            client=client,
+        await send_collect_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             buffer_tokens=500,
@@ -985,16 +930,14 @@ class TestSendCollectDebugLog:
             user="U001",
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "소화 트리거" in blocks_str
 
-    def test_shows_thread_label(self):
+    @pytest.mark.asyncio
+    async def test_shows_thread_label(self, mock_plugin_sdk):
         """스레드 메시지면 '스레드' 라벨 표시"""
-        client = MagicMock()
-
-        send_collect_debug_log(
-            client=client,
+        await send_collect_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             buffer_tokens=100,
@@ -1004,31 +947,28 @@ class TestSendCollectDebugLog:
             is_thread=True,
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "스레드" in blocks_str
 
-    def test_skips_when_no_debug_channel(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_no_debug_channel(self, mock_plugin_sdk):
         """디버그 채널 미설정이면 전송 안 함"""
-        client = MagicMock()
-
-        send_collect_debug_log(
-            client=client,
+        await send_collect_debug_log(
             debug_channel="",
             source_channel="C123",
             buffer_tokens=100,
             threshold=500,
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
-    def test_truncates_long_message(self):
+    @pytest.mark.asyncio
+    async def test_truncates_long_message(self, mock_plugin_sdk):
         """80자 초과 메시지는 잘림"""
-        client = MagicMock()
         long_text = "가" * 100
 
-        send_collect_debug_log(
-            client=client,
+        await send_collect_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             buffer_tokens=100,
@@ -1037,7 +977,7 @@ class TestSendCollectDebugLog:
             user="U001",
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         # fallback text 또는 blocks 내에 ... 포함
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "..." in blocks_str
@@ -1048,39 +988,35 @@ class TestSendCollectDebugLog:
 class TestSendDigestSkipDebugLog:
     """소화 스킵 디버그 로그"""
 
-    def test_sends_skip_log_with_blocks(self):
+    @pytest.mark.asyncio
+    async def test_sends_skip_log_with_blocks(self, mock_plugin_sdk):
         """스킵 시 Block Kit 로그 전송"""
-        client = MagicMock()
-
-        send_digest_skip_debug_log(
-            client=client,
+        await send_digest_skip_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             buffer_tokens=200,
             threshold=500,
         )
 
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert "blocks" in call_kwargs
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         assert "소화 스킵" in blocks_str
         assert "200" in blocks_str
         assert "500" in blocks_str
 
-    def test_skips_when_no_debug_channel(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_no_debug_channel(self, mock_plugin_sdk):
         """디버그 채널 미설정이면 전송 안 함"""
-        client = MagicMock()
-
-        send_digest_skip_debug_log(
-            client=client,
+        await send_digest_skip_debug_log(
             debug_channel="",
             source_channel="C123",
             buffer_tokens=200,
             threshold=500,
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
 
 # ── send_multi_judge_debug_log 테스트 ─────────────────
@@ -1088,10 +1024,9 @@ class TestSendDigestSkipDebugLog:
 class TestSendMultiJudgeDebugLog:
     """복수 판단 디버그 로그 테스트"""
 
-    def test_sends_blocks_with_summary(self):
+    @pytest.mark.asyncio
+    async def test_sends_blocks_with_summary(self, mock_plugin_sdk):
         """요약 블록에 채널, pending 수, 판단 결과 포함"""
-        client = MagicMock()
-
         items = [
             JudgeItem(ts="1001.000", importance=7, reaction_type="react",
                       reaction_content="laughing", emotion="유쾌"),
@@ -1101,8 +1036,7 @@ class TestSendMultiJudgeDebugLog:
             InterventionAction(type="react", target="1001.000", content="laughing"),
         ]
 
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             items=items,
@@ -1111,8 +1045,8 @@ class TestSendMultiJudgeDebugLog:
             pending_count=5,
         )
 
-        client.chat_postMessage.assert_called_once()
-        call_kwargs = client.chat_postMessage.call_args[1]
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert call_kwargs["channel"] == "C_DEBUG"
         assert "blocks" in call_kwargs
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
@@ -1121,10 +1055,9 @@ class TestSendMultiJudgeDebugLog:
         assert "react 1" in blocks_str
         assert "none 1" in blocks_str
 
-    def test_per_message_blocks(self):
+    @pytest.mark.asyncio
+    async def test_per_message_blocks(self, mock_plugin_sdk):
         """각 메시지별 독립 블록이 생성됨"""
-        client = MagicMock()
-
         items = [
             JudgeItem(ts="1001.000", importance=7, reaction_type="react",
                       reaction_content="laughing", emotion="유쾌", reasoning="재미있는 대화"),
@@ -1135,8 +1068,7 @@ class TestSendMultiJudgeDebugLog:
 
         react_actions = [InterventionAction(type="react", target="1001.000", content="laughing")]
 
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             items=items,
@@ -1144,7 +1076,7 @@ class TestSendMultiJudgeDebugLog:
             message_actions_executed=[],
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         blocks_str = json.dumps(call_kwargs["blocks"], ensure_ascii=False)
         # 각 메시지의 ts가 포함
         assert "1001.000" in blocks_str
@@ -1154,10 +1086,9 @@ class TestSendMultiJudgeDebugLog:
         assert "재미있는 대화" in blocks_str
         assert "관심" in blocks_str
 
-    def test_header_shows_message_count(self):
+    @pytest.mark.asyncio
+    async def test_header_shows_message_count(self, mock_plugin_sdk):
         """헤더에 메시지 개수 표시 (react/intervene이 있을 때)"""
-        client = MagicMock()
-
         items = [
             JudgeItem(ts="1001.000", importance=3, reaction_type="react",
                       reaction_content="thumbsup", reaction_target="1001.000"),
@@ -1167,8 +1098,7 @@ class TestSendMultiJudgeDebugLog:
 
         react_actions = [InterventionAction(type="react", target="1001.000", content="thumbsup")]
 
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             items=items,
@@ -1176,22 +1106,20 @@ class TestSendMultiJudgeDebugLog:
             message_actions_executed=[],
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         blocks = call_kwargs["blocks"]
         header_text = blocks[0]["text"]["text"]
         assert "3 messages" in header_text
 
-    def test_skips_when_no_actions(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_no_actions(self, mock_plugin_sdk):
         """react/intervene 모두 0건이면 전송 안 함"""
-        client = MagicMock()
-
         items = [
             JudgeItem(ts="1001.000", importance=0, reaction_type="none"),
             JudgeItem(ts="1002.000", importance=0, reaction_type="none"),
         ]
 
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             items=items,
@@ -1199,14 +1127,12 @@ class TestSendMultiJudgeDebugLog:
             message_actions_executed=[],
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
-    def test_skips_when_no_debug_channel(self):
+    @pytest.mark.asyncio
+    async def test_skips_when_no_debug_channel(self, mock_plugin_sdk):
         """디버그 채널 미설정이면 전송 안 함"""
-        client = MagicMock()
-
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="",
             source_channel="C123",
             items=[JudgeItem(ts="1.0", importance=1, reaction_type="none")],
@@ -1214,19 +1140,17 @@ class TestSendMultiJudgeDebugLog:
             message_actions_executed=[],
         )
 
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
-    def test_fallback_text(self):
+    @pytest.mark.asyncio
+    async def test_fallback_text(self, mock_plugin_sdk):
         """fallback text에 요약 정보 포함"""
-        client = MagicMock()
-
         items = [
             JudgeItem(ts="1001.000", importance=5, reaction_type="react",
                       reaction_content="heart"),
         ]
 
-        send_multi_judge_debug_log(
-            client=client,
+        await send_multi_judge_debug_log(
             debug_channel="C_DEBUG",
             source_channel="C123",
             items=items,
@@ -1234,7 +1158,7 @@ class TestSendMultiJudgeDebugLog:
             message_actions_executed=[],
         )
 
-        call_kwargs = client.chat_postMessage.call_args[1]
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
         assert "text" in call_kwargs
         assert "C123" in call_kwargs["text"]
         assert "1 messages" in call_kwargs["text"]

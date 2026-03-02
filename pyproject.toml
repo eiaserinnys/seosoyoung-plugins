@@ -27,6 +27,22 @@ dependencies = [
     # seosoyoung plugin_sdk
     # TODO: Package plugin_sdk separately for proper distribution
     # For now, using pythonpath in pytest config for local development
+
+    # Common dependencies
+    "pyyaml>=6.0.0",
+    "requests>=2.31.0",
+
+    # Translate plugin
+    "rapidfuzz>=3.0.0",
+    "kiwipiepy>=0.18.0",
+
+    # Memory/Observer plugins
+    "openai>=1.0.0",
+    "tiktoken>=0.7.0",
+    "filelock>=3.13.0",
+
+    # Trello plugin
+    "py-trello>=0.19.0",
 ]
 
 [project.optional-dependencies]

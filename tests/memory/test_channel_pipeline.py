@@ -106,20 +106,18 @@ class TestRunChannelPipeline:
     """소화/판단 분리 파이프라인 통합 테스트"""
 
     @pytest.mark.asyncio
-    async def test_skip_when_pending_below_threshold_a(self, store, channel_id):
+    async def test_skip_when_pending_below_threshold_a(self, store, channel_id, mock_plugin_sdk):
         """pending 토큰이 threshold_A 미만이면 스킵"""
         store.append_pending(channel_id, {
             "ts": "1.1", "user": "U1", "text": "짧은 메시지",
         })
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=99999,
         )
@@ -130,18 +128,16 @@ class TestRunChannelPipeline:
         assert len(store.load_pending(channel_id)) == 1
 
     @pytest.mark.asyncio
-    async def test_judge_called_when_above_threshold_a(self, store, channel_id):
+    async def test_judge_called_when_above_threshold_a(self, store, channel_id, mock_plugin_sdk):
         """pending이 threshold_A 이상이면 judge 호출"""
         _fill_pending(store, channel_id)
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=999999,
@@ -152,18 +148,16 @@ class TestRunChannelPipeline:
         assert observer.digest_call_count == 0
 
     @pytest.mark.asyncio
-    async def test_pending_moved_to_judged_after_pipeline(self, store, channel_id):
+    async def test_pending_moved_to_judged_after_pipeline(self, store, channel_id, mock_plugin_sdk):
         """파이프라인 실행 후 pending이 judged로 이동"""
         _fill_pending(store, channel_id, n=5)
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=999999,
@@ -174,19 +168,17 @@ class TestRunChannelPipeline:
         assert len(store.load_judged(channel_id)) == 5
 
     @pytest.mark.asyncio
-    async def test_digest_triggered_when_above_threshold_b(self, store, channel_id):
+    async def test_digest_triggered_when_above_threshold_b(self, store, channel_id, mock_plugin_sdk):
         """judged+pending이 threshold_B 초과하면 digest 호출"""
         _fill_judged(store, channel_id, n=10)
         _fill_pending(store, channel_id, n=10)
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=1,  # 매우 낮은 임계치
@@ -200,19 +192,17 @@ class TestRunChannelPipeline:
         assert saved["content"] == "새로운 digest 결과"
 
     @pytest.mark.asyncio
-    async def test_digest_clears_judged(self, store, channel_id):
+    async def test_digest_clears_judged(self, store, channel_id, mock_plugin_sdk):
         """digest 편입 후 judged가 비워짐"""
         _fill_judged(store, channel_id, n=5)
         _fill_pending(store, channel_id, n=5)
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=1,
@@ -223,7 +213,7 @@ class TestRunChannelPipeline:
         assert len(judged) == 5  # pending에서 이동된 것만
 
     @pytest.mark.asyncio
-    async def test_digest_compressor_triggered(self, store, channel_id):
+    async def test_digest_compressor_triggered(self, store, channel_id, mock_plugin_sdk):
         """digest 토큰이 max 초과하면 compressor 호출"""
         _fill_judged(store, channel_id, n=5)
         _fill_pending(store, channel_id, n=5)
@@ -234,14 +224,12 @@ class TestRunChannelPipeline:
         )
         observer = FakeObserver(digest_result=long_digest)
         compressor = FakeCompressor()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=1,
@@ -255,20 +243,18 @@ class TestRunChannelPipeline:
         assert saved["content"] == "압축된 digest"
 
     @pytest.mark.asyncio
-    async def test_no_compressor_when_under_max(self, store, channel_id):
+    async def test_no_compressor_when_under_max(self, store, channel_id, mock_plugin_sdk):
         """digest 토큰이 max 이하면 compressor 호출 안 함"""
         _fill_judged(store, channel_id, n=5)
         _fill_pending(store, channel_id, n=5)
         observer = FakeObserver()
         compressor = FakeCompressor()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=1,
@@ -279,20 +265,18 @@ class TestRunChannelPipeline:
         assert compressor.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_judge_returns_none(self, store, channel_id):
+    async def test_judge_returns_none(self, store, channel_id, mock_plugin_sdk):
         """judge가 None을 반환하면 파이프라인 중단"""
         _fill_pending(store, channel_id)
 
         observer = FakeObserver()
         observer.judge_result = None
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
@@ -301,7 +285,7 @@ class TestRunChannelPipeline:
         assert len(store.load_pending(channel_id)) > 0
 
     @pytest.mark.asyncio
-    async def test_react_action_executed(self, store, channel_id):
+    async def test_react_action_executed(self, store, channel_id, mock_plugin_sdk):
         """judge가 react를 반환하면 이모지 리액션 실행"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -310,27 +294,25 @@ class TestRunChannelPipeline:
             reaction_target="1001.000",
             reaction_content="laughing",
         ))
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
         # 이모지 리액션 API 호출 확인
-        client.reactions_add.assert_called_once_with(
+        mock_plugin_sdk["slack"].add_reaction.assert_called_once_with(
             channel=channel_id,
-            name="laughing",
-            timestamp="1001.000",
+            ts="1001.000",
+            emoji="laughing",
         )
 
     @pytest.mark.asyncio
-    async def test_intervene_action_with_llm(self, store, channel_id):
+    async def test_intervene_action_with_llm(self, store, channel_id, mock_plugin_sdk):
         """judge가 intervene을 반환하면 LLM으로 응답 생성"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -339,8 +321,6 @@ class TestRunChannelPipeline:
             reaction_target="1005.000",
             reaction_content="이 대화에 끼어들어야 할 것 같습니다",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="흥미로운 이야기로군요.")
 
@@ -348,7 +328,6 @@ class TestRunChannelPipeline:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,  # 항상 통과
@@ -357,10 +336,10 @@ class TestRunChannelPipeline:
 
         # LLM이 호출되고 슬랙에 발송됨
         mock_llm.assert_called_once()
-        client.chat_postMessage.assert_called()
+        mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
-    async def test_intervene_without_llm_fallback(self, store, channel_id):
+    async def test_intervene_without_llm_fallback(self, store, channel_id, mock_plugin_sdk):
         """llm_call이 없으면 직접 발송"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -369,63 +348,55 @@ class TestRunChannelPipeline:
             reaction_target="channel",
             reaction_content="직접 발송 텍스트",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
             llm_call=None,
         )
 
-        client.chat_postMessage.assert_called()
+        mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
-    async def test_debug_log_sent(self, store, channel_id):
+    async def test_debug_log_sent(self, store, channel_id, mock_plugin_sdk):
         """디버그 채널에 로그 전송"""
         _fill_pending(store, channel_id)
         observer = FakeObserver()
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             debug_channel="C_DEBUG",
         )
 
         # 디버그 채널에 로그가 전송됨
-        calls = client.chat_postMessage.call_args_list
+        calls = mock_plugin_sdk["slack"].send_message.call_args_list
         debug_calls = [c for c in calls if c[1].get("channel") == "C_DEBUG"]
         assert len(debug_calls) >= 1
 
     @pytest.mark.asyncio
-    async def test_thread_buffers_passed_to_judge(self, store, channel_id):
+    async def test_thread_buffers_passed_to_judge(self, store, channel_id, mock_plugin_sdk):
         """스레드 버퍼가 judge에 전달되는지 확인"""
         _fill_pending(store, channel_id)
         store.append_thread_message(channel_id, "ts_a", {
             "ts": "9001.000", "user": "U99", "text": "스레드 대화 내용",
         })
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=999999,
@@ -438,21 +409,19 @@ class TestRunChannelPipeline:
         assert thread_buffers["ts_a"][0]["text"] == "스레드 대화 내용"
 
     @pytest.mark.asyncio
-    async def test_thread_buffers_cleared_after_pipeline(self, store, channel_id):
+    async def test_thread_buffers_cleared_after_pipeline(self, store, channel_id, mock_plugin_sdk):
         """파이프라인 실행 후 스레드 버퍼도 judged로 이동되고 비워짐"""
         _fill_pending(store, channel_id, n=5)
         store.append_thread_message(channel_id, "ts_a", {
             "ts": "9001.000", "user": "U99", "text": "스레드 메시지",
         })
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             threshold_b=999999,
@@ -465,19 +434,17 @@ class TestRunChannelPipeline:
         assert len(judged) == 6  # 5 pending + 1 thread
 
     @pytest.mark.asyncio
-    async def test_existing_digest_passed_to_judge(self, store, channel_id):
+    async def test_existing_digest_passed_to_judge(self, store, channel_id, mock_plugin_sdk):
         """기존 digest가 judge에 전달되는지 확인"""
         store.save_digest(channel_id, "이전 digest", {"token_count": 50})
         _fill_pending(store, channel_id)
         observer = FakeObserver()
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
@@ -491,7 +458,7 @@ class TestProbabilityBasedIntervention:
     """확률 기반 개입 통과/차단 테스트"""
 
     @pytest.mark.asyncio
-    async def test_threshold_zero_always_passes(self, store, channel_id):
+    async def test_threshold_zero_always_passes(self, store, channel_id, mock_plugin_sdk):
         """임계치 0이면 항상 개입 통과"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -500,8 +467,6 @@ class TestProbabilityBasedIntervention:
             reaction_target="channel",
             reaction_content="개입",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="응답")
 
@@ -509,7 +474,6 @@ class TestProbabilityBasedIntervention:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -519,7 +483,7 @@ class TestProbabilityBasedIntervention:
         mock_llm.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_threshold_one_blocks_most(self, store, channel_id):
+    async def test_threshold_one_blocks_most(self, store, channel_id, mock_plugin_sdk):
         """임계치 1.0이면 대부분 차단 (importance/10 * prob ≈ 0.9 최대)"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -528,8 +492,6 @@ class TestProbabilityBasedIntervention:
             reaction_target="channel",
             reaction_content="개입",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="응답")
 
@@ -537,7 +499,6 @@ class TestProbabilityBasedIntervention:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=1.0,
@@ -548,7 +509,7 @@ class TestProbabilityBasedIntervention:
         mock_llm.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_probability_debug_log_sent(self, store, channel_id):
+    async def test_probability_debug_log_sent(self, store, channel_id, mock_plugin_sdk):
         """개입 시도 시 확률 디버그 로그가 전송됨"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -557,15 +518,12 @@ class TestProbabilityBasedIntervention:
             reaction_target="channel",
             reaction_content="개입",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -573,7 +531,7 @@ class TestProbabilityBasedIntervention:
         )
 
         # 디버그 채널에 확률 판단 로그가 전송됨
-        calls = client.chat_postMessage.call_args_list
+        calls = mock_plugin_sdk["slack"].send_message.call_args_list
         debug_calls = [c for c in calls if c[1].get("channel") == "C_DEBUG"]
         debug_texts = [c[1]["text"] for c in debug_calls]
         assert any("개입 확률 판단" in t for t in debug_texts)
@@ -587,7 +545,7 @@ class TestMultiJudgePipeline:
     """JudgeResult.items를 사용하는 복수 판단 파이프라인 테스트"""
 
     @pytest.mark.asyncio
-    async def test_multi_react_all_executed(self, store, channel_id):
+    async def test_multi_react_all_executed(self, store, channel_id, mock_plugin_sdk):
         """복수 react 판단이 모두 실행됨"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -599,27 +557,24 @@ class TestMultiJudgePipeline:
                 JudgeItem(ts="1005.000", importance=2, reaction_type="none"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
         # 2개 이모지 리액션 실행
-        assert client.reactions_add.call_count == 2
-        call_args_list = [c[1] for c in client.reactions_add.call_args_list]
-        emojis = {c["name"] for c in call_args_list}
+        assert mock_plugin_sdk["slack"].add_reaction.call_count == 2
+        call_args_list = [c[1] for c in mock_plugin_sdk["slack"].add_reaction.call_args_list]
+        emojis = {c["emoji"] for c in call_args_list}
         assert emojis == {"laughing", "eyes"}
 
     @pytest.mark.asyncio
-    async def test_multi_react_plus_intervene(self, store, channel_id):
+    async def test_multi_react_plus_intervene(self, store, channel_id, mock_plugin_sdk):
         """react + intervene이 섞인 경우: react 일괄 + intervene 확률 판단"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -631,9 +586,6 @@ class TestMultiJudgePipeline:
                           reaction_content="흥미로운 대화로군요"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="서소영 응답")
 
@@ -641,7 +593,6 @@ class TestMultiJudgePipeline:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -649,12 +600,12 @@ class TestMultiJudgePipeline:
         )
 
         # react 실행됨
-        client.reactions_add.assert_called_once()
+        mock_plugin_sdk["slack"].add_reaction.assert_called_once()
         # intervene도 실행됨
         mock_llm.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_multi_all_none(self, store, channel_id):
+    async def test_multi_all_none(self, store, channel_id, mock_plugin_sdk):
         """모든 판단이 none이면 아무 액션도 없음"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -663,23 +614,21 @@ class TestMultiJudgePipeline:
                 JudgeItem(ts="1002.000", importance=2, reaction_type="none"),
             ],
         ))
-        client = MagicMock()
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
-        client.reactions_add.assert_not_called()
-        client.chat_postMessage.assert_not_called()
+        mock_plugin_sdk["slack"].add_reaction.assert_not_called()
+        mock_plugin_sdk["slack"].send_message.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_multi_pending_moved_to_judged(self, store, channel_id):
+    async def test_multi_pending_moved_to_judged(self, store, channel_id, mock_plugin_sdk):
         """복수 판단 후에도 pending이 judged로 이동"""
         _fill_pending(store, channel_id, n=5)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -688,15 +637,12 @@ class TestMultiJudgePipeline:
                           reaction_target="1001.000", reaction_content="eyes"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
@@ -705,7 +651,7 @@ class TestMultiJudgePipeline:
         assert len(store.load_judged(channel_id)) == 5
 
     @pytest.mark.asyncio
-    async def test_multi_debug_log_sent(self, store, channel_id):
+    async def test_multi_debug_log_sent(self, store, channel_id, mock_plugin_sdk):
         """복수 판단 시 디버그 로그가 전송됨"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -715,22 +661,18 @@ class TestMultiJudgePipeline:
                           reaction_target="1002.000", reaction_content="laughing"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             debug_channel="C_DEBUG",
         )
 
-        debug_calls = [c for c in client.chat_postMessage.call_args_list
+        debug_calls = [c for c in mock_plugin_sdk["slack"].send_message.call_args_list
                        if c[1].get("channel") == "C_DEBUG"]
         assert len(debug_calls) >= 1
         # 복수 판단 로그에 메시지 수 포함
@@ -738,7 +680,7 @@ class TestMultiJudgePipeline:
         assert "2 messages" in fallback
 
     @pytest.mark.asyncio
-    async def test_multi_intervene_threshold_blocks(self, store, channel_id):
+    async def test_multi_intervene_threshold_blocks(self, store, channel_id, mock_plugin_sdk):
         """복수 판단에서 확률 임계치가 intervene을 차단"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -749,9 +691,6 @@ class TestMultiJudgePipeline:
                           reaction_target="channel", reaction_content="개입"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="응답")
 
@@ -759,7 +698,6 @@ class TestMultiJudgePipeline:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=1.0,  # 높은 임계치 → 차단
@@ -767,7 +705,7 @@ class TestMultiJudgePipeline:
         )
 
         # react는 실행됨
-        client.reactions_add.assert_called_once()
+        mock_plugin_sdk["slack"].add_reaction.assert_called_once()
         # intervene은 차단됨
         mock_llm.assert_not_called()
 
@@ -914,8 +852,10 @@ class TestBotResponseRecordedInJudged:
     """봇 개입 응답 ts가 judged에 기록되는지 테스트"""
 
     @pytest.mark.asyncio
-    async def test_bot_response_ts_appended_to_judged(self, store, channel_id):
+    async def test_bot_response_ts_appended_to_judged(self, store, channel_id, mock_plugin_sdk):
         """개입 후 봇 응답이 judged에 기록됨"""
+        from seosoyoung.plugin_sdk.slack import SendMessageResult
+
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
             importance=8,
@@ -923,20 +863,18 @@ class TestBotResponseRecordedInJudged:
             reaction_target="1005.000",
             reaction_content="개입해야 함",
         ))
-        client = MagicMock()
-        # chat_postMessage가 ts를 반환하도록 설정
-        client.chat_postMessage = MagicMock(return_value={
-            "ok": True,
-            "ts": "9999.000",
-        })
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
+
+        # 특정 ts 반환하도록 설정
+        mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
+            ok=True, ts="9999.000", channel=channel_id
+        )
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -956,8 +894,10 @@ class TestInterventionSessionCreation:
     """개입 후 세션이 생성되는지 테스트 (Phase 3-1)"""
 
     @pytest.mark.asyncio
-    async def test_session_created_after_intervene(self, store, channel_id):
+    async def test_session_created_after_intervene(self, store, channel_id, mock_plugin_sdk):
         """개입 응답 후 응답 ts로 세션이 생성되어야 함"""
+        from seosoyoung.plugin_sdk.slack import SendMessageResult
+
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
             importance=8,
@@ -965,13 +905,13 @@ class TestInterventionSessionCreation:
             reaction_target="1005.000",
             reaction_content="개입해야 함",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={
-            "ok": True,
-            "ts": "9999.000",
-        })
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
+
+        # 특정 ts 반환하도록 설정
+        mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
+            ok=True, ts="9999.000", channel=channel_id
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             session_mgr = SessionManager(session_dir=Path(tmpdir))
@@ -980,7 +920,6 @@ class TestInterventionSessionCreation:
                 store=store,
                 observer=observer,
                 channel_id=channel_id,
-                slack_client=client,
                 cooldown=history,
                 threshold_a=1,
                 intervention_threshold=0.0,
@@ -998,8 +937,10 @@ class TestInterventionSessionCreation:
             assert session.user_id == ""  # 아직 지시자 없음
 
     @pytest.mark.asyncio
-    async def test_session_not_created_without_session_manager(self, store, channel_id):
+    async def test_session_not_created_without_session_manager(self, store, channel_id, mock_plugin_sdk):
         """session_manager가 없으면 세션 생성을 건너뜀 (호환성)"""
+        from seosoyoung.plugin_sdk.slack import SendMessageResult
+
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
             importance=8,
@@ -1007,20 +948,19 @@ class TestInterventionSessionCreation:
             reaction_target="1005.000",
             reaction_content="개입해야 함",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={
-            "ok": True,
-            "ts": "9999.000",
-        })
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
+
+        # 특정 ts 반환하도록 설정
+        mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
+            ok=True, ts="9999.000", channel=channel_id
+        )
 
         # session_manager 전달 안 함 → 에러 없이 정상 동작
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -1034,7 +974,7 @@ class TestInterventionSessionCreation:
         assert len(bot_msgs) == 1
 
     @pytest.mark.asyncio
-    async def test_channel_target_session_has_no_thread(self, store, channel_id):
+    async def test_channel_target_session_has_no_thread(self, store, channel_id, mock_plugin_sdk):
         """target이 'channel'이면 세션 생성하지 않음 (스레드 대화 불가)"""
         _fill_pending(store, channel_id)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -1043,11 +983,6 @@ class TestInterventionSessionCreation:
             reaction_target="channel",
             reaction_content="채널 전체에 개입",
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={
-            "ok": True,
-            "ts": "9999.000",
-        })
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="채널 개입 메시지.")
 
@@ -1058,7 +993,6 @@ class TestInterventionSessionCreation:
                 store=store,
                 observer=observer,
                 channel_id=channel_id,
-                slack_client=client,
                 cooldown=history,
                 threshold_a=1,
                 intervention_threshold=0.0,
@@ -1151,7 +1085,7 @@ class TestFilterAlreadyReacted:
         assert result[0].target == "2.2"
 
     @pytest.mark.asyncio
-    async def test_pipeline_skips_already_reacted(self, store, channel_id):
+    async def test_pipeline_skips_already_reacted(self, store, channel_id, mock_plugin_sdk):
         """파이프라인에서 봇이 이미 리액션한 메시지에 대해 중복 리액션하지 않음"""
         # pending에 봇 리액션이 이미 기록된 메시지 추가
         for i in range(5):
@@ -1175,25 +1109,22 @@ class TestFilterAlreadyReacted:
                           reaction_target="1003.000", reaction_content="eyes"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             bot_user_id="BOT_U1",
         )
 
         # 1001.000은 이미 laughing 리액션 있으므로 스킵, 1003.000만 실행
-        assert client.reactions_add.call_count == 1
-        call_kwargs = client.reactions_add.call_args[1]
-        assert call_kwargs["timestamp"] == "1003.000"
-        assert call_kwargs["name"] == "eyes"
+        assert mock_plugin_sdk["slack"].add_reaction.call_count == 1
+        call_kwargs = mock_plugin_sdk["slack"].add_reaction.call_args[1]
+        assert call_kwargs["ts"] == "1003.000"
+        assert call_kwargs["emoji"] == "eyes"
 
 
 # ── Bug A: move_snapshot_to_judged가 예외 시에도 실행되는지 ──
@@ -1202,7 +1133,7 @@ class TestBugA_MoveSnapshotInFinally:
     """Bug A: _handle_multi_judge 예외 시에도 pending이 judged로 이동되는지 확인"""
 
     @pytest.mark.asyncio
-    async def test_pending_moved_even_on_exception(self, store, channel_id):
+    async def test_pending_moved_even_on_exception(self, store, channel_id, mock_plugin_sdk):
         """_handle_multi_judge에서 예외 발생해도 pending→judged 이동됨"""
         _fill_pending(store, channel_id, n=5)
         # judge가 items를 반환하여 _handle_multi_judge 경로 진입
@@ -1213,10 +1144,9 @@ class TestBugA_MoveSnapshotInFinally:
                           reaction_content="개입"),
             ],
         ))
-        client = MagicMock()
-        # reactions_add에서 예외 발생 → _handle_multi_judge 내부 예외
-        client.reactions_add = MagicMock(side_effect=RuntimeError("Event loop is closed"))
-        client.chat_postMessage = MagicMock(side_effect=RuntimeError("Event loop is closed"))
+        # add_reaction에서 예외 발생 → _handle_multi_judge 내부 예외
+        mock_plugin_sdk["slack"].add_reaction.side_effect = RuntimeError("Event loop is closed")
+        mock_plugin_sdk["slack"].send_message.side_effect = RuntimeError("Event loop is closed")
         history = InterventionHistory(base_dir=store.base_dir)
 
         # 예외가 전파되더라도 finally에서 move_snapshot_to_judged가 실행되어야 함
@@ -1225,7 +1155,6 @@ class TestBugA_MoveSnapshotInFinally:
                 store=store,
                 observer=observer,
                 channel_id=channel_id,
-                slack_client=client,
                 cooldown=history,
                 threshold_a=1,
                 intervention_threshold=0.0,
@@ -1287,7 +1216,7 @@ class TestBugC_InterveneFallbackPrevention:
     """Bug C: target_ts를 pending에서 못 찾으면 thread_buffers/judged 검색, 실패 시 스킵"""
 
     @pytest.mark.asyncio
-    async def test_intervene_skipped_when_target_not_found(self, store, channel_id):
+    async def test_intervene_skipped_when_target_not_found(self, store, channel_id, mock_plugin_sdk):
         """target_ts가 어디에도 없으면 intervention 자체를 스킵"""
         _fill_pending(store, channel_id)
         # target이 pending에 없는 ts
@@ -1298,8 +1227,6 @@ class TestBugC_InterveneFallbackPrevention:
                           reaction_content="엉뚱한 메시지 타겟"),
             ],
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="응답")
 
@@ -1307,7 +1234,6 @@ class TestBugC_InterveneFallbackPrevention:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -1318,7 +1244,7 @@ class TestBugC_InterveneFallbackPrevention:
         mock_llm.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_intervene_finds_target_in_thread_buffers(self, store, channel_id):
+    async def test_intervene_finds_target_in_thread_buffers(self, store, channel_id, mock_plugin_sdk):
         """target_ts가 thread_buffers에 있으면 해당 메시지로 응답 생성"""
         _fill_pending(store, channel_id)
         store.append_thread_message(channel_id, "root_ts", {
@@ -1331,8 +1257,6 @@ class TestBugC_InterveneFallbackPrevention:
                           reaction_content="스레드 대화에 개입"),
             ],
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="스레드 응답")
 
@@ -1340,7 +1264,6 @@ class TestBugC_InterveneFallbackPrevention:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -1349,10 +1272,10 @@ class TestBugC_InterveneFallbackPrevention:
 
         # thread_buffers에서 찾았으므로 LLM이 호출되어야 함
         mock_llm.assert_called_once()
-        client.chat_postMessage.assert_called()
+        mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
-    async def test_intervene_finds_target_in_judged(self, store, channel_id):
+    async def test_intervene_finds_target_in_judged(self, store, channel_id, mock_plugin_sdk):
         """target_ts가 judged에 있으면 해당 메시지로 응답 생성"""
         _fill_pending(store, channel_id)
         _fill_judged(store, channel_id, n=3)
@@ -1363,8 +1286,6 @@ class TestBugC_InterveneFallbackPrevention:
                           reaction_content="judged 메시지에 개입"),
             ],
         ))
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="judged 대상 응답")
 
@@ -1372,7 +1293,6 @@ class TestBugC_InterveneFallbackPrevention:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -1389,7 +1309,7 @@ class TestBugD_FilterNonPendingJudgeItems:
     """Bug D: AI가 THREAD CONVERSATIONS 메시지에 대해 생성한 JudgeItem 필터링"""
 
     @pytest.mark.asyncio
-    async def test_non_pending_items_filtered_out(self, store, channel_id):
+    async def test_non_pending_items_filtered_out(self, store, channel_id, mock_plugin_sdk):
         """pending ts에 없는 JudgeItem은 필터링되어 react/intervene 실행 안 됨"""
         _fill_pending(store, channel_id, n=3)  # ts: 1000.000 ~ 1002.000
         store.append_thread_message(channel_id, "root_ts", {
@@ -1405,9 +1325,6 @@ class TestBugD_FilterNonPendingJudgeItems:
                           reaction_content="스레드에 개입"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="응답")
 
@@ -1415,7 +1332,6 @@ class TestBugD_FilterNonPendingJudgeItems:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.0,
@@ -1423,14 +1339,14 @@ class TestBugD_FilterNonPendingJudgeItems:
         )
 
         # pending에 있는 1001.000 react만 실행됨
-        assert client.reactions_add.call_count == 1
-        call_kwargs = client.reactions_add.call_args[1]
-        assert call_kwargs["timestamp"] == "1001.000"
+        assert mock_plugin_sdk["slack"].add_reaction.call_count == 1
+        call_kwargs = mock_plugin_sdk["slack"].add_reaction.call_args[1]
+        assert call_kwargs["ts"] == "1001.000"
         # THREAD.999 intervene은 필터링되어 LLM 호출 없음
         mock_llm.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_all_pending_items_preserved(self, store, channel_id):
+    async def test_all_pending_items_preserved(self, store, channel_id, mock_plugin_sdk):
         """모든 items가 pending ts에 있으면 전부 유지"""
         _fill_pending(store, channel_id, n=5)
         observer = FakeObserver(judge_result=JudgeResult(
@@ -1441,21 +1357,18 @@ class TestBugD_FilterNonPendingJudgeItems:
                           reaction_target="1003.000", reaction_content="fire"),
             ],
         ))
-        client = MagicMock()
-        client.reactions_add = MagicMock(return_value={"ok": True})
         history = InterventionHistory(base_dir=store.base_dir)
 
         await run_channel_pipeline(
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
         )
 
         # 둘 다 pending에 있으므로 모두 실행
-        assert client.reactions_add.call_count == 2
+        assert mock_plugin_sdk["slack"].add_reaction.call_count == 2
 
 
 # ── burst/cooldown 전환 시나리오 테스트 ─────────────────
@@ -1464,7 +1377,7 @@ class TestPipelineBurstCooldown:
     """burst/cooldown 모델 파이프라인 통합 테스트"""
 
     @pytest.mark.asyncio
-    async def test_burst_consecutive_interventions_pass(self, store, channel_id):
+    async def test_burst_consecutive_interventions_pass(self, store, channel_id, mock_plugin_sdk):
         """burst 연속 3턴 통과 확인 — 이력 없음에서 시작하면 첫 개입 통과"""
         _fill_pending(store, channel_id)
 
@@ -1481,11 +1394,6 @@ class TestPipelineBurstCooldown:
             ],
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True, "ts": "9000.000"})
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.reactions_remove = MagicMock(return_value={"ok": True})
-
         history = InterventionHistory(base_dir=store.base_dir)
 
         async def mock_llm_call(system_prompt, user_prompt):
@@ -1495,7 +1403,6 @@ class TestPipelineBurstCooldown:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.18,
@@ -1504,14 +1411,14 @@ class TestPipelineBurstCooldown:
 
         # 이력 없음 → burst_probability = 0.9 → 통과
         channel_calls = [
-            c for c in client.chat_postMessage.call_args_list
+            c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == channel_id
         ]
         assert len(channel_calls) >= 1
         assert history.recent_count(channel_id) == 1
 
     @pytest.mark.asyncio
-    async def test_burst_ceiling_blocks(self, store, channel_id):
+    async def test_burst_ceiling_blocks(self, store, channel_id, mock_plugin_sdk):
         """burst 상한(7턴) 도달 시 차단"""
         import time as _time
         _fill_pending(store, channel_id)
@@ -1529,11 +1436,6 @@ class TestPipelineBurstCooldown:
             ],
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True})
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.reactions_remove = MagicMock(return_value={"ok": True})
-
         history = InterventionHistory(base_dir=store.base_dir)
         # 7개의 이력을 직접 삽입 (모두 최근 5분 이내)
         now = _time.time()
@@ -1550,7 +1452,6 @@ class TestPipelineBurstCooldown:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.18,
@@ -1559,13 +1460,13 @@ class TestPipelineBurstCooldown:
 
         # burst 상한 → probability=0.0 → 차단 (채널에 메시지 미발송)
         channel_calls = [
-            c for c in client.chat_postMessage.call_args_list
+            c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == channel_id
         ]
         assert len(channel_calls) == 0
 
     @pytest.mark.asyncio
-    async def test_cooldown_then_recovery(self, store, channel_id):
+    async def test_cooldown_then_recovery(self, store, channel_id, mock_plugin_sdk):
         """cooldown 후 충분한 시간이 지나면 다시 개입 가능"""
         import time as _time
         _fill_pending(store, channel_id)
@@ -1583,11 +1484,6 @@ class TestPipelineBurstCooldown:
             ],
         ))
 
-        client = MagicMock()
-        client.chat_postMessage = MagicMock(return_value={"ok": True, "ts": "9000.000"})
-        client.reactions_add = MagicMock(return_value={"ok": True})
-        client.reactions_remove = MagicMock(return_value={"ok": True})
-
         history = InterventionHistory(base_dir=store.base_dir)
         # 60분 전 burst 2턴 (cooldown 상태)
         now = _time.time()
@@ -1604,7 +1500,6 @@ class TestPipelineBurstCooldown:
             store=store,
             observer=observer,
             channel_id=channel_id,
-            slack_client=client,
             cooldown=history,
             threshold_a=1,
             intervention_threshold=0.18,
@@ -1613,7 +1508,7 @@ class TestPipelineBurstCooldown:
 
         # 60분 경과 + importance 8 → final_score = (8/10) * recovery ≈ 높음 → 통과
         channel_calls = [
-            c for c in client.chat_postMessage.call_args_list
+            c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == channel_id
         ]
         assert len(channel_calls) >= 1

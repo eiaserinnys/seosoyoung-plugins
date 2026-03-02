@@ -14,12 +14,17 @@ Available plugins:
 __version__ = "0.1.0"
 
 # Re-export plugins for convenient access
-from seosoyoung_plugins.trello.plugin import TrelloPlugin
-from seosoyoung_plugins.translate.plugin import TranslatePlugin
-from seosoyoung_plugins.channel_observer.plugin import ChannelObserverPlugin
+# Try-except to allow standalone usage of submodules (e.g., migration scripts)
+try:
+    from seosoyoung_plugins.trello.plugin import TrelloPlugin
+    from seosoyoung_plugins.translate.plugin import TranslatePlugin
+    from seosoyoung_plugins.channel_observer.plugin import ChannelObserverPlugin
 
-__all__ = [
-    "TrelloPlugin",
-    "TranslatePlugin",
-    "ChannelObserverPlugin",
-]
+    __all__ = [
+        "TrelloPlugin",
+        "TranslatePlugin",
+        "ChannelObserverPlugin",
+    ]
+except ImportError:
+    # plugin_sdk not available (e.g., running migration scripts)
+    __all__ = []
