@@ -25,7 +25,8 @@ classifiers = [
 
 dependencies = [
     # seosoyoung plugin_sdk (git dependency)
-    "seosoyoung @ git+https://github.com/eiaserinnys/seosoyoung.git@master",
+    # NOTE: seosoyoung dependency - installed from local for development
+    # "seosoyoung @ git+https://github.com/eiaserinnys/seosoyoung.git@main",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +39,9 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/eiaserinnys/seosoyoung-plugins"
 Repository = "https://github.com/eiaserinnys/seosoyoung-plugins.git"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/seosoyoung_plugins"]
