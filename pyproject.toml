@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "seosoyoung-plugins"
+version = "0.1.0"
+description = "Plugin implementations for seosoyoung slackbot"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Dorothy", email = "dorothy@eiaserinnys.dev" }
+]
+keywords = ["slack", "bot", "plugin", "seosoyoung"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # seosoyoung plugin_sdk (git dependency)
+    "seosoyoung @ git+https://github.com/eiaserinnys/seosoyoung.git@master",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/eiaserinnys/seosoyoung-plugins"
+Repository = "https://github.com/eiaserinnys/seosoyoung-plugins.git"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/seosoyoung_plugins"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src/seosoyoung_plugins"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
