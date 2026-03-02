@@ -1,5 +1,6 @@
 """TrelloWatcher 테스트"""
 
+import asyncio
 import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
@@ -46,7 +47,7 @@ def _make_watcher(tmp_path, **overrides):
         else:
             default_config[k] = v
 
-    return TrelloWatcher(
+    watcher = TrelloWatcher(
         trello_client=trello_client,
         prompt_builder=prompt_builder,
         config=default_config,
@@ -54,6 +55,15 @@ def _make_watcher(tmp_path, **overrides):
         data_dir=data_dir,
         list_runner_ref=list_runner_ref,
     )
+
+    # Set event loop for tests (normally set in _run() when thread starts)
+    try:
+        watcher._loop = asyncio.get_event_loop()
+    except RuntimeError:
+        watcher._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(watcher._loop)
+
+    return watcher
 
 
 class TestTrelloWatcherPauseResume:

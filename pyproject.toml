@@ -24,9 +24,9 @@ classifiers = [
 ]
 
 dependencies = [
-    # seosoyoung plugin_sdk (git dependency)
-    # NOTE: seosoyoung dependency - installed from local for development
-    # "seosoyoung @ git+https://github.com/eiaserinnys/seosoyoung.git@main",
+    # seosoyoung plugin_sdk
+    # TODO: Package plugin_sdk separately for proper distribution
+    # For now, using pythonpath in pytest config for local development
 ]
 
 [project.optional-dependencies]
@@ -50,7 +50,7 @@ packages = ["src/seosoyoung_plugins"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = ["src"]
+pythonpath = ["src", "../seosoyoung/src"]
 
 [tool.coverage.run]
 source = ["src/seosoyoung_plugins"]

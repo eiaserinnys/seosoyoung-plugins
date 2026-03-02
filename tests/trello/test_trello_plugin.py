@@ -205,13 +205,9 @@ class TestTrelloOnReaction:
         p = TrelloPlugin()
         await p.on_load(SAMPLE_CONFIG)
         p._watcher = MagicMock()
-        p._session_manager = MagicMock()
         p._restart_manager = MagicMock()
         p._restart_manager.is_pending = False
-        p._claude_runner_factory = MagicMock()
         p._get_session_lock = None
-        p._update_message_fn = MagicMock()
-        p._slack_client = MagicMock()
         return p
 
     @pytest.mark.asyncio
@@ -223,7 +219,7 @@ class TestTrelloOnReaction:
         }
         ctx = HookContext(
             hook_name="on_reaction",
-            args={"event": event, "client": MagicMock()},
+            args={"event": event},
         )
         hooks = plugin_with_watcher.register_hooks()
         result, value = await hooks["on_reaction"](ctx)
@@ -242,7 +238,7 @@ class TestTrelloOnReaction:
         }
         ctx = HookContext(
             hook_name="on_reaction",
-            args={"event": event, "client": MagicMock()},
+            args={"event": event, },
         )
         hooks = p.register_hooks()
         result, value = await hooks["on_reaction"](ctx)
@@ -259,22 +255,20 @@ class TestTrelloOnReaction:
         }
         ctx = HookContext(
             hook_name="on_reaction",
-            args={"event": event, "client": MagicMock()},
+            args={"event": event, },
         )
         hooks = plugin_with_watcher.register_hooks()
         result, value = await hooks["on_reaction"](ctx)
         assert result == HookResult.SKIP
 
     @pytest.mark.asyncio
-    async def test_stop_when_restart_pending(self, plugin_with_watcher):
+    async def test_stop_when_restart_pending(self, plugin_with_watcher, mock_plugin_sdk):
         plugin_with_watcher._restart_manager.is_pending = True
         mock_tracked = MagicMock()
         mock_tracked.card_id = "card-123"
         mock_tracked.card_name = "Test Card"
         plugin_with_watcher._watcher.get_tracked_by_thread_ts.return_value = mock_tracked
-        plugin_with_watcher._session_manager.get.return_value = MagicMock()
 
-        mock_client = MagicMock()
         event = {
             "reaction": "rocket",
             "item": {"ts": "1234.5678", "channel": "C_CH"},
@@ -282,27 +276,21 @@ class TestTrelloOnReaction:
         }
         ctx = HookContext(
             hook_name="on_reaction",
-            args={"event": event, "client": mock_client},
+            args={"event": event},
         )
         hooks = plugin_with_watcher.register_hooks()
         result, value = await hooks["on_reaction"](ctx)
         assert result == HookResult.STOP
-        mock_client.chat_postMessage.assert_called_once()
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_stop_and_start_thread_on_execute(self, plugin_with_watcher):
+    async def test_stop_and_start_thread_on_execute(self, plugin_with_watcher, mock_plugin_sdk):
         """Execute emoji on tracked card -> STOP and starts background thread."""
         mock_tracked = MagicMock()
         mock_tracked.card_id = "card-123"
         mock_tracked.card_name = "Test Card"
         plugin_with_watcher._watcher.get_tracked_by_thread_ts.return_value = mock_tracked
-        plugin_with_watcher._session_manager.get.return_value = MagicMock(
-            session_id="sess-abc"
-        )
         plugin_with_watcher._watcher.build_reaction_execute_prompt.return_value = "execute prompt"
-
-        mock_client = MagicMock()
-        mock_client.chat_postMessage.return_value = {"ts": "start-msg-ts"}
 
         event = {
             "reaction": "rocket",
@@ -311,7 +299,7 @@ class TestTrelloOnReaction:
         }
         ctx = HookContext(
             hook_name="on_reaction",
-            args={"event": event, "client": mock_client},
+            args={"event": event},
         )
 
         hooks = plugin_with_watcher.register_hooks()
@@ -445,7 +433,6 @@ class TestTrelloPluginManagerIntegration:
                     "item": {"ts": "1234.5678", "channel": "C_CH"},
                     "user": "U123",
                 },
-                "client": MagicMock(),
             },
         )
         ctx = await pm.dispatch("on_reaction", ctx)
