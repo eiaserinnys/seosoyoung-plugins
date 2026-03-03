@@ -1329,5 +1329,80 @@ class TestListRunOnSuccessLockOrder:
         )
 
 
+class TestSpawnClaudeThreadDmInfo:
+    """_spawn_claude_thread가 DM 정보를 soulstream.run()에 전달하는지 검증"""
+
+    def test_dm_info_passed_to_soulstream_run(self, tmp_path, mock_plugin_sdk):
+        """dm_channel_id, dm_thread_ts가 soulstream.run()에 전달됨"""
+        import time
+
+        watcher = _make_watcher(tmp_path)
+
+        tracked = TrackedCard(
+            card_id="card_dm",
+            card_name="DM Card",
+            card_url="",
+            list_id="list_test",
+            list_key="test",
+            thread_ts="thread_dm",
+            channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+
+        watcher._spawn_claude_thread(
+            prompt="test prompt",
+            thread_ts="thread_dm",
+            channel="C12345",
+            tracked=tracked,
+            dm_channel_id="D999",
+            dm_thread_ts="8888.0001",
+        )
+
+        # 스레드 완료 대기
+        time.sleep(0.5)
+
+        # soulstream.run()이 호출되었는지 확인
+        mock_soulstream = mock_plugin_sdk["soulstream"]
+        mock_soulstream.run.assert_called_once()
+
+        call_kwargs = mock_soulstream.run.call_args
+        # kwargs로 전달되었는지 확인
+        assert call_kwargs.kwargs.get("dm_channel_id") == "D999"
+        assert call_kwargs.kwargs.get("dm_thread_ts") == "8888.0001"
+
+    def test_no_dm_info_when_not_provided(self, tmp_path, mock_plugin_sdk):
+        """dm_channel_id, dm_thread_ts가 None이면 None으로 전달"""
+        import time
+
+        watcher = _make_watcher(tmp_path)
+
+        tracked = TrackedCard(
+            card_id="card_no_dm",
+            card_name="No DM Card",
+            card_url="",
+            list_id="list_test",
+            list_key="test",
+            thread_ts="thread_no_dm",
+            channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+
+        watcher._spawn_claude_thread(
+            prompt="test",
+            thread_ts="thread_no_dm",
+            channel="C12345",
+            tracked=tracked,
+        )
+
+        time.sleep(0.5)
+
+        mock_soulstream = mock_plugin_sdk["soulstream"]
+        mock_soulstream.run.assert_called_once()
+
+        call_kwargs = mock_soulstream.run.call_args
+        assert call_kwargs.kwargs.get("dm_channel_id") is None
+        assert call_kwargs.kwargs.get("dm_thread_ts") is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
