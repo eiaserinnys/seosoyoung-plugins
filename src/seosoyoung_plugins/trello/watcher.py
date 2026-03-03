@@ -548,6 +548,8 @@ class TrelloWatcher:
                         thread_ts=thread_ts,
                         role="admin",
                         session_id=session_id,
+                        dm_channel_id=dm_channel_id,
+                        dm_thread_ts=dm_thread_ts,
                     )
                 )
 
