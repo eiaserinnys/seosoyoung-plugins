@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import threading
+from typing import Callable, Optional
 
 from seosoyoung_plugins.channel_observer.intervention import InterventionHistory
 from seosoyoung_plugins.channel_observer.observer import ChannelObserver, DigestCompressor
@@ -37,6 +38,7 @@ class ChannelDigestScheduler:
         digest_target_tokens: int = 5000,
         debug_channel: str = "",
         intervention_threshold: float = 0.3,
+        llm_call: Optional[Callable] = None,
         mention_tracker=None,
         bot_user_id: str = "",
         **kwargs,
@@ -52,6 +54,7 @@ class ChannelDigestScheduler:
         self.digest_target_tokens = digest_target_tokens
         self.debug_channel = debug_channel
         self.intervention_threshold = intervention_threshold
+        self.llm_call = llm_call
         self.mention_tracker = mention_tracker
         self.bot_user_id = bot_user_id
 
@@ -134,6 +137,7 @@ class ChannelDigestScheduler:
                     digest_target_tokens=self.digest_target_tokens,
                     debug_channel=self.debug_channel,
                     intervention_threshold=self.intervention_threshold,
+                    llm_call=self.llm_call,
                     bot_user_id=self.bot_user_id,
                     mention_tracker=self.mention_tracker,
                 )

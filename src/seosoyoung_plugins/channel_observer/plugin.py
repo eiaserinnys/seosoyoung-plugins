@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 
@@ -74,6 +74,7 @@ class ChannelObserverPlugin(Plugin):
         self._compressor = None
         self._scheduler = None
         self._mention_tracker = None
+        self._llm_call = self._make_llm_call() if self._api_key else None
 
         logger.info(
             "ChannelObserverPlugin loaded: channels=%s, threshold_a=%d",
@@ -158,6 +159,7 @@ class ChannelObserverPlugin(Plugin):
                 digest_target_tokens=self._digest_target_tokens,
                 debug_channel=self._debug_channel,
                 intervention_threshold=self._intervention_threshold,
+                llm_call=self._llm_call,
                 mention_tracker=self._mention_tracker,
                 bot_user_id=self._bot_user_id,
             )
@@ -248,6 +250,35 @@ class ChannelObserverPlugin(Plugin):
 
     # -- Internal helpers ------------------------------------------------------
 
+    def _make_llm_call(
+        self,
+    ) -> Callable[..., Coroutine[Any, Any, str]]:
+        """개입 응답 생성용 LLM 호출 함수를 반환합니다.
+
+        pipeline.py의 llm_call 시그니처에 맞춰
+        async def(system_prompt, user_prompt) -> str 를 반환합니다.
+        observer와 동일한 OpenAI API 키를 사용하되,
+        응답 생성에는 compressor_model(고성능 모델)을 사용합니다.
+        """
+        import openai
+
+        client = openai.AsyncOpenAI(api_key=self._api_key)
+        model = self._compressor_model
+
+        async def llm_call(
+            system_prompt: str, user_prompt: str
+        ) -> str:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return response.choices[0].message.content or ""
+
+        return llm_call
+
     def _contains_trigger_word(self, text: str) -> bool:
         """텍스트에 트리거 워드가 포함되어 있는지 확인합니다."""
         if not self._trigger_words:
@@ -299,6 +330,7 @@ class ChannelObserverPlugin(Plugin):
                             digest_target_tokens=self._digest_target_tokens,
                             debug_channel=self._debug_channel,
                             intervention_threshold=self._intervention_threshold,
+                            llm_call=self._llm_call,
                             bot_user_id=self._bot_user_id,
                             mention_tracker=self._mention_tracker,
                         )
