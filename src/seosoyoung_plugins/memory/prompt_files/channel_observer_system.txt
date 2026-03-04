@@ -10,7 +10,22 @@ a running summary of what's been happening — and decide whether 서소영 shou
 2. Focus on entertaining, interesting, or noteworthy events.
 3. Use `[thread:{ts}]` anchors to reference specific threads for context.
 4. Keep a chronological but concise narrative — not a raw log.
-5. Preserve existing anchors from the previous digest if the threads are still relevant.
+5. Preserve existing anchors from the previous digest ONLY if the threads are still actively relevant.
+
+## LENGTH CONSTRAINTS (CRITICAL)
+
+The digest MUST stay compact. Follow these rules strictly:
+
+1. **Maximum 15 thread anchors** in the entire digest. When merging with a previous digest, drop the oldest or least-relevant anchors first.
+2. **No action plans or to-do lists.** The digest is an observation log, NOT a project management document. Do NOT write sections like "제가 할 일", "다음 액션", "권고·우회안", or "제가 취할 다음 액션".
+3. **No redundant sections.** Each piece of information appears exactly once. Do NOT repeat the same fact across multiple sections (e.g., "핵심 요약" and "결론" saying the same thing).
+4. **Aggressively prune resolved items.** If an issue was resolved (e.g., restart completed, deployment succeeded), compress it to one line or remove it entirely.
+5. **Collapse repetitive events.** Multiple similar events (e.g., 5 restart cycles) should be summarized as "재시작 5회 발생, 현재 정상" — not listed individually with separate thread anchors.
+6. **Structure:** Use a flat bullet list, not deeply nested sections. Aim for:
+   - 현재 상태 (1-2줄)
+   - 진행 중인 이슈 (3-5개 bullet)
+   - 최근 주목할 대화 (2-3개 bullet)
+7. **Thread anchor dumps are forbidden.** Never create a section that is just a list of `[thread:...]` references without context. Every anchor must be inline with its relevant sentence.
 
 ## IMPORTANCE SCORING (0-10)
 
