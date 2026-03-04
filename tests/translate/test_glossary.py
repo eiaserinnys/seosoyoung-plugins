@@ -6,10 +6,15 @@ from unittest.mock import patch, mock_open
 from seosoyoung_plugins.translate.glossary import (
     _extract_name_pair,
     _extract_short_names,
+    _extract_english_words,
+    _build_word_index,
+    _get_effective_stopwords,
     get_glossary_entries,
     find_relevant_terms,
     find_relevant_terms_v2,
     GlossaryMatchResult,
+    ENGLISH_STOPWORDS,
+    EXTENDED_COMMON_WORDS,
     clear_cache,
 )
 
@@ -118,7 +123,7 @@ class TestFindRelevantTerms:
         )
         mock_index.return_value = (
             {"펜릭스": [0], "아리엘라": [1]},
-            {"Fenrix": [0], "Ariella": [1]}
+            {"fenrix": [0], "ariella": [1]}
         )
         mock_extract.return_value = ["펜릭스", "아리엘라"]
 
@@ -140,7 +145,7 @@ class TestFindRelevantTerms:
         )
         mock_index.return_value = (
             {"펜릭스": [0], "아리엘라": [1]},
-            {"Fenrix": [0], "Ariella": [1]}
+            {"fenrix": [0], "ariella": [1]}
         )
         mock_extract.return_value = ["Fenrix", "Ariella"]
 
@@ -157,7 +162,7 @@ class TestFindRelevantTerms:
     def test_find_no_matching_terms(self, mock_extract, mock_entries, mock_index):
         """매칭되는 용어 없음"""
         mock_entries.return_value = (("펜릭스", "Fenrix"),)
-        mock_index.return_value = ({"펜릭스": [0]}, {"Fenrix": [0]})
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
         mock_extract.return_value = ["Hello", "world"]
 
         text = "Hello world"
@@ -171,7 +176,7 @@ class TestFindRelevantTerms:
     def test_no_duplicate_matches(self, mock_extract, mock_entries, mock_index):
         """중복 매칭 방지"""
         mock_entries.return_value = (("펜릭스", "Fenrix"),)
-        mock_index.return_value = ({"펜릭스": [0]}, {"Fenrix": [0]})
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
         mock_extract.return_value = ["펜릭스", "펜릭스"]
 
         text = "펜릭스가 펜릭스에게 말했다."
@@ -192,7 +197,7 @@ class TestFindRelevantTerms:
         )
         mock_index.return_value = (
             {"아리엘라": [0], "펜릭스 헤이븐": [1], "펜릭스": [1], "헤이븐": [1]},
-            {"Ariella": [0], "Fenrix Haven": [1], "Fenrix": [1], "Haven": [1]}
+            {"ariella": [0], "fenrix haven": [1], "fenrix": [1], "haven": [1]}
         )
         mock_extract.return_value = ["아리엘나"]  # 오타 (4자 중 1자 다름 = 75%)
 
@@ -210,7 +215,7 @@ class TestFindRelevantTerms:
     def test_fuzzy_match_english_typo(self, mock_extract, mock_entries, mock_index):
         """영어 오타 퍼지 매칭"""
         mock_entries.return_value = (("아리엘라", "Ariella"),)
-        mock_index.return_value = ({"아리엘라": [0]}, {"Ariella": [0]})
+        mock_index.return_value = ({"아리엘라": [0]}, {"ariella": [0]})
         mock_extract.return_value = ["Ariela"]  # 오타
 
         text = "Ariela spoke quietly."
@@ -227,7 +232,7 @@ class TestFindRelevantTerms:
         mock_entries.return_value = (("망각의 성채", "The Sanctuary of Oblivion"),)
         mock_index.return_value = (
             {"망각의 성채": [0], "망각의": [0], "성채": [0]},
-            {"The Sanctuary of Oblivion": [0], "Sanctuary": [0], "Oblivion": [0]}
+            {"the sanctuary of oblivion": [0], "sanctuary": [0], "oblivion": [0]}
         )
         mock_extract.return_value = ["망각의성채"]  # 띄어쓰기 없음
 
@@ -244,7 +249,7 @@ class TestFindRelevantTerms:
     def test_short_term_no_fuzzy(self, mock_extract, mock_entries, mock_index):
         """짧은 용어(3자 미만)는 퍼지 매칭 미적용"""
         mock_entries.return_value = (("루미", "Lumi"),)
-        mock_index.return_value = ({"루미": [0]}, {"Lumi": [0]})
+        mock_index.return_value = ({"루미": [0]}, {"lumi": [0]})
         mock_extract.return_value = ["루비"]  # 2글자, 퍼지 미적용
 
         text = "루비가 다가왔다."
@@ -259,7 +264,7 @@ class TestFindRelevantTerms:
     def test_fuzzy_threshold_high(self, mock_extract, mock_entries, mock_index):
         """높은 임계값에서 퍼지 매칭 실패"""
         mock_entries.return_value = (("아리엘라", "Ariella"),)
-        mock_index.return_value = ({"아리엘라": [0]}, {"Ariella": [0]})
+        mock_index.return_value = ({"아리엘라": [0]}, {"ariella": [0]})
         mock_extract.return_value = ["아리엘나"]
 
         text = "아리엘나가 말했다."
@@ -274,7 +279,7 @@ class TestFindRelevantTerms:
     def test_exact_match_priority(self, mock_extract, mock_entries, mock_index):
         """정확한 매칭이 있으면 퍼지 매칭 중복 안 함"""
         mock_entries.return_value = (("펜릭스", "Fenrix"),)
-        mock_index.return_value = ({"펜릭스": [0]}, {"Fenrix": [0]})
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
         mock_extract.return_value = ["펜릭스"]
 
         text = "펜릭스가 말했다."
@@ -294,7 +299,7 @@ class TestFindRelevantTermsV2:
     def test_returns_glossary_match_result(self, mock_extract, mock_entries, mock_index):
         """GlossaryMatchResult 반환 확인"""
         mock_entries.return_value = (("펜릭스", "Fenrix"),)
-        mock_index.return_value = ({"펜릭스": [0]}, {"Fenrix": [0]})
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
         mock_extract.return_value = ["펜릭스"]
 
         result = find_relevant_terms_v2("펜릭스가 말했다.", "ko", glossary_path="")
@@ -310,7 +315,7 @@ class TestFindRelevantTermsV2:
     def test_debug_info_contains_match_types(self, mock_extract, mock_entries, mock_index):
         """디버그 정보에 매칭 유형 포함 확인"""
         mock_entries.return_value = (("펜릭스", "Fenrix"),)
-        mock_index.return_value = ({"펜릭스": [0]}, {"Fenrix": [0]})
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
         mock_extract.return_value = ["펜릭스"]
 
         result = find_relevant_terms_v2("펜릭스가 말했다.", "ko", glossary_path="")
@@ -320,6 +325,182 @@ class TestFindRelevantTermsV2:
         assert "substring_matches" in debug
         assert "fuzzy_matches" in debug
         assert "total_matched" in debug
+
+
+class TestCaseInsensitiveMatching:
+    """대소문자 무관 매칭 테스트"""
+
+    @patch("seosoyoung_plugins.translate.glossary._build_word_index")
+    @patch("seosoyoung_plugins.translate.glossary.get_glossary_entries")
+    @patch("seosoyoung_plugins.translate.glossary._extract_english_words")
+    def test_lowercase_word_matches_glossary(self, mock_extract, mock_entries, mock_index):
+        """소문자 단어도 용어집 매칭 성공: 'fenrix' -> Fenrix"""
+        mock_entries.return_value = (("펜릭스", "Fenrix"),)
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
+        mock_extract.return_value = ["fenrix"]
+
+        result = find_relevant_terms("fenrix is here.", "en", glossary_path="")
+
+        assert len(result) == 1
+        assert ("Fenrix", "펜릭스") in result
+
+    @patch("seosoyoung_plugins.translate.glossary._build_word_index")
+    @patch("seosoyoung_plugins.translate.glossary.get_glossary_entries")
+    @patch("seosoyoung_plugins.translate.glossary._extract_english_words")
+    def test_uppercase_word_matches_glossary(self, mock_extract, mock_entries, mock_index):
+        """대문자 단어도 용어집 매칭 성공: 'FENRIX' -> Fenrix"""
+        mock_entries.return_value = (("펜릭스", "Fenrix"),)
+        mock_index.return_value = ({"펜릭스": [0]}, {"fenrix": [0]})
+        mock_extract.return_value = ["FENRIX"]
+
+        result = find_relevant_terms("FENRIX IS HERE.", "en", glossary_path="")
+
+        assert len(result) == 1
+        assert ("Fenrix", "펜릭스") in result
+
+    @patch("seosoyoung_plugins.translate.glossary._build_word_index")
+    @patch("seosoyoung_plugins.translate.glossary.get_glossary_entries")
+    @patch("seosoyoung_plugins.translate.glossary._extract_english_words")
+    def test_mixed_case_same_result(self, mock_extract, mock_entries, mock_index):
+        """대소문자 혼합 입력 모두 동일 결과: 'Fenrix', 'fenrix', 'FENRIX'"""
+        mock_entries.return_value = (
+            ("펜릭스", "Fenrix"),
+            ("아리엘라", "Ariella"),
+        )
+        mock_index.return_value = (
+            {"펜릭스": [0], "아리엘라": [1]},
+            {"fenrix": [0], "ariella": [1]},
+        )
+
+        for word_variant in ["Fenrix", "fenrix", "FENRIX"]:
+            mock_extract.return_value = [word_variant]
+            result = find_relevant_terms(f"{word_variant} spoke.", "en", glossary_path="")
+            assert len(result) == 1, f"'{word_variant}' should match"
+            assert ("Fenrix", "펜릭스") in result
+
+
+class TestCapitalizationFiltering:
+    """Capitalization 기반 필터링 테스트"""
+
+    def test_capitalized_word_kept(self):
+        """대문자 시작 단어는 확장 불용어를 우회하여 유지됨"""
+        # "Time"은 EXTENDED_COMMON_WORDS에 있지만, 대문자로 시작하므로 유지
+        result = _extract_english_words("Time flies quickly")
+        assert "Time" in result
+
+    def test_lowercase_common_word_filtered(self):
+        """소문자 시작 일반 단어는 확장 불용어로 필터됨"""
+        # "time"은 EXTENDED_COMMON_WORDS에 있고 소문자이므로 제거
+        result = _extract_english_words("time flies quickly")
+        assert "time" not in result
+        # "quickly"도 EXTENDED_COMMON_WORDS에 있고 소문자이므로 제거
+        assert "quickly" not in result
+
+    def test_basic_stopwords_always_filtered(self):
+        """기본 불용어는 대소문자 무관하게 항상 필터됨"""
+        result = _extract_english_words("The quick brown fox")
+        assert "The" not in result
+        assert "the" not in [w.lower() for w in result if w.lower() == "the"]
+
+    def test_proper_noun_not_filtered(self):
+        """고유명사(대문자 시작)는 확장 불용어에 있어도 유지"""
+        # "Haven"은 EXTENDED_COMMON_WORDS에 "haven"으로 있을 수 있지만
+        # 대문자로 시작하므로 확장 불용어 필터를 우회
+        result = _extract_english_words("Haven is beautiful")
+        assert "Haven" in result
+
+
+class TestExtendedStopwords:
+    """확장 불용어 테스트"""
+
+    def test_extended_common_words_count(self):
+        """확장 불용어가 200개 이상 포함"""
+        assert len(EXTENDED_COMMON_WORDS) >= 200
+
+    def test_common_words_in_extended(self):
+        """고빈도 일반 단어가 확장 불용어에 포함"""
+        common_words = ["few", "other", "core", "generated", "related", "great", "small"]
+        for word in common_words:
+            assert word in EXTENDED_COMMON_WORDS, f"'{word}' should be in EXTENDED_COMMON_WORDS"
+
+    def test_lowercase_common_words_excluded(self):
+        """소문자 일반 단어가 영어 추출 시 제외됨"""
+        result = _extract_english_words("few other related items generated here")
+        for word in ["few", "other", "related", "generated"]:
+            assert word not in result, f"'{word}' should be filtered"
+
+    @patch("seosoyoung_plugins.translate.glossary._build_word_index")
+    def test_glossary_protection_haven(self, mock_index):
+        """용어집 보호: 'haven'이 용어집에 있으면 불용어에서 제외"""
+        # en_index에 "haven"이 있으면 effective stopwords에서 제외됨
+        mock_index.return_value = (
+            {},
+            {"fenrix haven": [0], "fenrix": [0], "haven": [0]},
+        )
+
+        clear_cache()
+        effective = _get_effective_stopwords("test_glossary_path")
+
+        # "haven"은 EXTENDED_COMMON_WORDS에 없을 수 있지만,
+        # 용어집에 있는 단어가 불용어에서 제외되는 로직을 검증
+        # en_index 키와 겹치는 단어는 effective에 포함되지 않아야 함
+        assert "haven" not in effective
+        assert "fenrix" not in effective
+
+    @patch("seosoyoung_plugins.translate.glossary._build_word_index")
+    def test_glossary_protection_grace(self, mock_index):
+        """용어집 보호: 일반 단어이면서 게임 용어인 경우 불용어에서 제외"""
+        mock_index.return_value = (
+            {},
+            {"grace": [0], "forge": [1]},
+        )
+
+        clear_cache()
+        effective = _get_effective_stopwords("test_glossary_path")
+
+        # "grace"와 "forge"는 en_index에 있으므로 effective에서 제외
+        assert "grace" not in effective
+        assert "forge" not in effective
+
+
+class TestBuildWordIndexLowercase:
+    """역색인 .lower() 정규화 테스트"""
+
+    @patch("seosoyoung_plugins.translate.glossary.get_glossary_entries")
+    def test_en_index_keys_are_lowercase(self, mock_entries):
+        """영어 역색인 키가 .lower()로 정규화됨"""
+        mock_entries.return_value = (
+            ("펜릭스 헤이븐", "Fenrix Haven"),
+            ("아리엘라", "Ariella"),
+        )
+
+        clear_cache()
+        kr_index, en_index = _build_word_index("test_path")
+
+        # 영어 키는 모두 소문자
+        for key in en_index:
+            assert key == key.lower(), f"en_index key '{key}' should be lowercase"
+
+        # 구체적 검증
+        assert "fenrix haven" in en_index
+        assert "fenrix" in en_index
+        assert "ariella" in en_index
+        # 원본 대소문자 키는 없어야 함
+        assert "Fenrix" not in en_index
+        assert "Fenrix Haven" not in en_index
+
+    @patch("seosoyoung_plugins.translate.glossary.get_glossary_entries")
+    def test_kr_index_keys_unchanged(self, mock_entries):
+        """한국어 역색인 키는 변경 없음"""
+        mock_entries.return_value = (
+            ("펜릭스 헤이븐", "Fenrix Haven"),
+        )
+
+        clear_cache()
+        kr_index, _ = _build_word_index("test_path")
+
+        assert "펜릭스 헤이븐" in kr_index
+        assert "펜릭스" in kr_index
 
 
 class TestClearCache:
