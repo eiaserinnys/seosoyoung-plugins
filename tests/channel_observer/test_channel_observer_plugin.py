@@ -373,6 +373,113 @@ class TestTriggerWordDetection:
         assert p._contains_trigger_word("서소영") is False
 
 
+class TestLlmCallCreation:
+    """_make_llm_call and _llm_call initialization."""
+
+    @pytest.mark.asyncio
+    async def test_llm_call_created_when_api_key_present(self):
+        """api_key가 있으면 on_load 시 _llm_call이 생성됩니다."""
+        p = ChannelObserverPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+        assert p._llm_call is not None
+        assert callable(p._llm_call)
+
+    @pytest.mark.asyncio
+    async def test_llm_call_none_when_no_api_key(self):
+        """api_key가 없으면 _llm_call이 None입니다."""
+        p = ChannelObserverPlugin()
+        config = {**SAMPLE_CONFIG, "api_key": ""}
+        await p.on_load(config)
+        assert p._llm_call is None
+
+    @pytest.mark.asyncio
+    async def test_llm_call_none_when_api_key_missing(self):
+        """api_key 키 자체가 없으면 _llm_call이 None입니다."""
+        p = ChannelObserverPlugin()
+        config = {k: v for k, v in SAMPLE_CONFIG.items() if k != "api_key"}
+        await p.on_load(config)
+        assert p._llm_call is None
+
+    @pytest.mark.asyncio
+    async def test_llm_call_passed_to_pipeline(self):
+        """_maybe_trigger_digest에서 run_channel_pipeline에 llm_call이 전달됩니다."""
+        p = ChannelObserverPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+        p._store = MagicMock()
+        p._store.count_pending_tokens.return_value = 200
+        p._observer_engine = MagicMock()
+        p._cooldown = MagicMock()
+        p._bot_user_id = "U_BOT"
+
+        with patch(
+            "seosoyoung_plugins.channel_observer.pipeline.run_channel_pipeline",
+            new_callable=AsyncMock,
+        ) as mock_pipeline:
+            p._maybe_trigger_digest("C_OBSERVE1")
+            # Wait for the daemon thread to start and run
+            import time
+            time.sleep(0.3)
+
+            if mock_pipeline.called:
+                call_kwargs = mock_pipeline.call_args.kwargs
+                assert "llm_call" in call_kwargs
+                assert call_kwargs["llm_call"] is p._llm_call
+
+    @pytest.mark.asyncio
+    async def test_llm_call_passed_to_scheduler(self):
+        """ChannelDigestScheduler에 llm_call이 전달됩니다."""
+        p = ChannelObserverPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+
+        import seosoyoung_plugins.channel_observer.store
+        import seosoyoung_plugins.channel_observer.collector
+        import seosoyoung_plugins.channel_observer.intervention
+        import seosoyoung_plugins.channel_observer.observer
+        import seosoyoung_plugins.channel_observer.scheduler
+
+        mock_scheduler_cls = MagicMock()
+
+        with (
+            patch(
+                "seosoyoung_plugins.channel_observer.store.ChannelStore",
+                MagicMock(),
+            ),
+            patch(
+                "seosoyoung_plugins.channel_observer.collector.ChannelMessageCollector",
+                MagicMock(),
+            ),
+            patch(
+                "seosoyoung_plugins.channel_observer.intervention.InterventionHistory",
+                MagicMock(),
+            ),
+            patch(
+                "seosoyoung_plugins.channel_observer.observer.ChannelObserver",
+                MagicMock(),
+            ),
+            patch(
+                "seosoyoung_plugins.channel_observer.observer.DigestCompressor",
+                MagicMock(),
+            ),
+            patch(
+                "seosoyoung_plugins.channel_observer.scheduler.ChannelDigestScheduler",
+                mock_scheduler_cls,
+            ),
+        ):
+            ctx = HookContext(
+                hook_name="on_startup",
+                args={
+                    "slack_client": MagicMock(),
+                    "mention_tracker": MagicMock(),
+                },
+            )
+            hooks = p.register_hooks()
+            await hooks["on_startup"](ctx)
+
+            call_kwargs = mock_scheduler_cls.call_args.kwargs
+            assert "llm_call" in call_kwargs
+            assert call_kwargs["llm_call"] is p._llm_call
+
+
 class TestChannelObserverManagerIntegration:
     """End-to-end with PluginManager."""
 
