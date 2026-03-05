@@ -13,12 +13,17 @@ import openai
 
 from seosoyoung_plugins.translate.detector import Language
 from seosoyoung_plugins.translate.glossary import find_relevant_terms_v2, GlossaryMatchResult
+from seosoyoung_plugins.translate.slack_escape import escape_slack_markup, unescape_slack_markup
 
 logger = logging.getLogger(__name__)
 
 
 def _build_context_text(context_messages: list[dict]) -> str:
     """이전 대화 컨텍스트를 텍스트로 변환
+
+    컨텍스트는 번역 대상이 아니라 참고용이지만,
+    슬랙 마크업이 프롬프트를 혼란시킬 수 있으므로 이스케이프합니다.
+    복원은 불필요합니다.
 
     Args:
         context_messages: 이전 메시지 목록 [{"user": "이름", "text": "내용"}, ...]
@@ -31,7 +36,8 @@ def _build_context_text(context_messages: list[dict]) -> str:
 
     lines = ["<previous_messages>"]
     for msg in context_messages:
-        lines.append(f"[{msg['user']}]: {msg['text']}")
+        escaped_text, _ = escape_slack_markup(msg["text"])
+        lines.append(f"[{msg['user']}]: {escaped_text}")
     lines.append("</previous_messages>")
     return "\n".join(lines)
 
@@ -71,8 +77,11 @@ def _build_prompt(
     source_lang: Language,
     glossary_path: str,
     context_messages: list[dict] | None = None,
-) -> tuple[str, list[tuple[str, str]], GlossaryMatchResult | None]:
+) -> tuple[str, list[tuple[str, str]], GlossaryMatchResult | None, dict[str, str]]:
     """번역 프롬프트 생성
+
+    슬랙 마크업(링크, 멘션, 이모지, 코드 등)을 플레이스홀더로 치환한 뒤
+    프롬프트에 삽입합니다. 치환 맵은 번역 후 복원에 사용됩니다.
 
     Args:
         text: 번역할 텍스트
@@ -81,27 +90,43 @@ def _build_prompt(
         context_messages: 이전 대화 컨텍스트
 
     Returns:
-        (프롬프트 문자열, 참고한 용어 목록, 매칭 결과 객체)
+        (프롬프트 문자열, 참고한 용어 목록, 매칭 결과 객체, 슬랙 마크업 치환 맵)
     """
     target_lang = "English" if source_lang == Language.KOREAN else "Korean"
+
+    # 슬랙 마크업 이스케이프 (용어집 매칭 전에 원본 텍스트 사용)
+    escaped_text, slack_replacements = escape_slack_markup(text)
 
     # 컨텍스트 섹션
     context_text = ""
     if context_messages:
         context_text = _build_context_text(context_messages) + "\n\n"
 
-    # 용어집 섹션
+    # 용어집 섹션 (원본 텍스트로 매칭하여 고유명사를 정확히 찾음)
     glossary_section, glossary_terms, match_result = _build_glossary_section(
         text, source_lang, glossary_path
     )
     glossary_text = glossary_section + "\n\n" if glossary_section else ""
 
-    prompt = f"""{context_text}{glossary_text}Translate the following text to {target_lang}.
-Output ONLY the translation, nothing else. No explanations, no quotes, no prefixes.
+    # 플레이스홀더 보존 지시 (플레이스홀더가 있을 때만 추가)
+    placeholder_instruction = ""
+    if slack_replacements:
+        placeholder_instruction = (
+            "Preserve all placeholders like [[LINK1]], [[MENTION1]], "
+            "[[BROADCAST1]], [[EMOJI1]], [[CODE1]] exactly as they are. "
+            "Do not translate, modify, or remove them.\n"
+        )
 
-Text to translate:
-{text}"""
-    return prompt, glossary_terms, match_result
+    prompt = (
+        f"{context_text}{glossary_text}"
+        f"Translate the following text to {target_lang}.\n"
+        f"Output ONLY the translation, nothing else. "
+        f"No explanations, no quotes, no prefixes.\n"
+        f"{placeholder_instruction}\n"
+        f"Text to translate:\n"
+        f"{escaped_text}"
+    )
+    return prompt, glossary_terms, match_result, slack_replacements
 
 
 # 모델별 가격 (USD per 1M tokens)
@@ -204,7 +229,7 @@ def translate(
     Raises:
         ValueError: 잘못된 backend
     """
-    prompt, glossary_terms, match_result = _build_prompt(
+    prompt, glossary_terms, match_result, slack_replacements = _build_prompt(
         text, source_lang, glossary_path, context_messages
     )
 
@@ -216,6 +241,9 @@ def translate(
         translated, input_tokens, output_tokens = _translate_anthropic(prompt, model, api_key)
     else:
         raise ValueError(f"Unknown backend: {backend}")
+
+    # 슬랙 마크업 복원
+    translated = unescape_slack_markup(translated, slack_replacements)
 
     cost = _calculate_cost(input_tokens, output_tokens, model)
 
