@@ -49,20 +49,20 @@ class TestBuildPrompt:
 
     def test_korean_to_english(self):
         """한국어 -> 영어 프롬프트"""
-        prompt, terms, match_result = _build_prompt("안녕하세요", Language.KOREAN, "")
+        prompt, terms, match_result, slack_replacements = _build_prompt("안녕하세요", Language.KOREAN, "")
         assert "English" in prompt
         assert "안녕하세요" in prompt
 
     def test_english_to_korean(self):
         """영어 -> 한국어 프롬프트"""
-        prompt, terms, match_result = _build_prompt("Hello", Language.ENGLISH, "")
+        prompt, terms, match_result, slack_replacements = _build_prompt("Hello", Language.ENGLISH, "")
         assert "Korean" in prompt
         assert "Hello" in prompt
 
     def test_with_context(self):
         """컨텍스트 포함"""
         context = [{"user": "Alice", "text": "Previous message"}]
-        prompt, terms, match_result = _build_prompt("Hello", Language.ENGLISH, "", context)
+        prompt, terms, match_result, slack_replacements = _build_prompt("Hello", Language.ENGLISH, "", context)
         assert "<previous_messages>" in prompt
         assert "[Alice]: Previous message" in prompt
 
@@ -75,7 +75,7 @@ class TestBuildPrompt:
             debug_info={}
         )
         mock_find_terms_v2.return_value = mock_result
-        prompt, terms, match_result = _build_prompt("펜릭스가 말했다.", Language.KOREAN, "")
+        prompt, terms, match_result, slack_replacements = _build_prompt("펜릭스가 말했다.", Language.KOREAN, "")
         assert "<glossary>" in prompt
         assert "펜릭스 → Fenrix" in prompt
         assert terms == [("펜릭스", "Fenrix")]
@@ -85,9 +85,40 @@ class TestBuildPrompt:
         """관련 용어 없을 때 용어집 섹션 없음"""
         mock_result = GlossaryMatchResult(matched_terms=[], extracted_words=[], debug_info={})
         mock_find_terms_v2.return_value = mock_result
-        prompt, terms, match_result = _build_prompt("Hello", Language.ENGLISH, "")
+        prompt, terms, match_result, slack_replacements = _build_prompt("Hello", Language.ENGLISH, "")
         assert "<glossary>" not in prompt
         assert terms == []
+
+    def test_slack_markup_escaped_in_prompt(self):
+        """슬랙 마크업이 프롬프트에서 플레이스홀더로 치환됨"""
+        text = "<@U123> shared <https://example.com|a link>"
+        prompt, terms, match_result, slack_replacements = _build_prompt(text, Language.ENGLISH, "")
+        assert "<@U123>" not in prompt
+        assert "https://example.com" not in prompt
+        assert "[[MENTION1]]" in prompt
+        assert "[[LINK1]]" in prompt
+        assert len(slack_replacements) == 2
+
+    def test_placeholder_instruction_added_when_markup_present(self):
+        """마크업이 있을 때 플레이스홀더 보존 지시가 프롬프트에 포함됨"""
+        text = "Check <https://example.com|this>"
+        prompt, _, _, slack_replacements = _build_prompt(text, Language.ENGLISH, "")
+        assert "Preserve all placeholders" in prompt
+        assert len(slack_replacements) > 0
+
+    def test_no_placeholder_instruction_for_plain_text(self):
+        """마크업 없는 텍스트에는 플레이스홀더 지시 없음"""
+        text = "Hello world"
+        prompt, _, _, slack_replacements = _build_prompt(text, Language.ENGLISH, "")
+        assert "Preserve all placeholders" not in prompt
+        assert slack_replacements == {}
+
+    def test_context_messages_also_escaped(self):
+        """컨텍스트 메시지의 슬랙 마크업도 이스케이프됨"""
+        context = [{"user": "Alice", "text": "See <https://example.com|link>"}]
+        prompt, _, _, _ = _build_prompt("Hello", Language.ENGLISH, "", context)
+        assert "https://example.com" not in prompt
+        assert "[[LINK1]]" in prompt
 
 
 class TestBuildGlossarySection:
