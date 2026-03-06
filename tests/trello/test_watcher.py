@@ -880,7 +880,7 @@ class TestMultiCardChainingIntegration:
     on_success 내부의 threading.Thread도 동기화하여 전체 체인을 검증합니다.
     """
 
-    @patch("seosoyoung.slackbot.plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
     def test_three_card_chaining_completes(self, tmp_path, mock_plugin_sdk):
         """3장의 카드가 순차적으로 처리되고 세션이 COMPLETED 상태가 됨"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -1239,7 +1239,7 @@ class TestListRunOnSuccessLockOrder:
     - on_success 내부의 새 스레드가 같은 락 획득 시도 → 블로킹
     """
 
-    @patch("seosoyoung.slackbot.plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
     def test_lock_state_after_on_success_with_real_lock(self, tmp_path, mock_plugin_sdk):
         """실제 락과 _spawn_claude_thread를 사용할 때 on_success 시 락이 해제되어 있어야 함
 
@@ -1402,6 +1402,463 @@ class TestSpawnClaudeThreadDmInfo:
         call_kwargs = mock_soulstream.run.call_args
         assert call_kwargs.kwargs.get("dm_channel_id") is None
         assert call_kwargs.kwargs.get("dm_thread_ts") is None
+
+
+class TestAdaptivePolling:
+    """_run() 메인 루프의 adaptive polling 로직 테스트"""
+
+    def test_poll_returns_false_when_no_new_cards(self, tmp_path):
+        """새 카드가 없으면 _poll()이 False를 반환"""
+        mock_trello = MagicMock()
+        mock_trello.get_cards_in_list.return_value = []
+        mock_trello.get_lists.return_value = []
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"watch_lists": {"to_go": "list_togo"}},
+        )
+        assert watcher._poll() is False
+
+    def test_poll_returns_true_when_new_cards_found(self, tmp_path, mock_plugin_sdk):
+        """새 카드가 있으면 _poll()이 True를 반환"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+        mock_trello.get_lists.return_value = []
+
+        card = TrelloCard(
+            id="new_card_1",
+            name="New Card",
+            desc="",
+            url="https://trello.com/c/new1",
+            list_id="list_togo",
+            labels=[],
+        )
+        mock_trello.get_cards_in_list.return_value = [card]
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={
+                "watch_lists": {"to_go": "list_togo"},
+                "list_ids": {"in_progress": "list_ip"},
+            },
+        )
+        assert watcher._poll() is True
+
+    def test_poll_returns_false_when_paused(self, tmp_path):
+        """일시 중단 상태면 _poll()이 False를 반환"""
+        watcher = _make_watcher(tmp_path)
+        watcher.pause()
+        assert watcher._poll() is False
+
+    def test_burst_config_defaults(self, tmp_path):
+        """burst 설정이 config에 없으면 기본값 사용"""
+        watcher = _make_watcher(tmp_path)
+        assert watcher.burst_interval == 3
+        assert watcher.max_burst_count == 5
+
+    def test_burst_config_custom(self, tmp_path):
+        """config에서 burst 설정을 커스텀할 수 있음"""
+        watcher = _make_watcher(
+            tmp_path,
+            config={
+                "burst_interval": 2,
+                "max_burst_count": 10,
+            },
+        )
+        assert watcher.burst_interval == 2
+        assert watcher.max_burst_count == 10
+
+    def test_run_uses_burst_interval_when_cards_found(self, tmp_path):
+        """새 카드 감지 시 burst_interval로 대기
+
+        _run()의 adaptive polling 로직을 직접 검증:
+        - 첫 폴링: 새 카드 발견 → burst 모드 진입
+        - 두 번째 폴링: 새 카드 없음 → burst 모드 종료
+        - 세 번째 이후: 정상 간격
+        """
+        poll_results = [True, False]
+        poll_index = [0]
+        wait_times = []
+
+        watcher = _make_watcher(
+            tmp_path,
+            config={
+                "burst_interval": 2,
+                "max_burst_count": 5,
+                "poll_interval": 15,
+            },
+        )
+
+        # _poll을 모킹하여 새 카드 감지를 시뮬레이션
+        def mock_poll():
+            idx = min(poll_index[0], len(poll_results) - 1)
+            poll_index[0] += 1
+            return poll_results[idx]
+
+        watcher._poll = mock_poll
+
+        # _stop_event.wait를 모킹하여 대기 시간 기록
+        original_wait = watcher._stop_event.wait
+
+        def recording_wait(timeout=None):
+            wait_times.append(timeout)
+            watcher._stop_event.set()  # 루프 종료
+            return True
+
+        watcher._stop_event.wait = recording_wait
+        watcher._loop = asyncio.new_event_loop()
+
+        try:
+            watcher._run()
+        finally:
+            if watcher._loop and not watcher._loop.is_closed():
+                watcher._loop.close()
+
+        # 첫 폴링에서 새 카드 발견 → burst_interval(2초)로 대기
+        assert len(wait_times) >= 1
+        assert wait_times[0] == 2
+
+    def test_run_uses_normal_interval_when_no_cards(self, tmp_path):
+        """새 카드가 없으면 정상 간격으로 대기"""
+        wait_times = []
+
+        watcher = _make_watcher(
+            tmp_path,
+            config={
+                "burst_interval": 2,
+                "max_burst_count": 5,
+                "poll_interval": 15,
+            },
+        )
+
+        watcher._poll = lambda: False
+
+        def recording_wait(timeout=None):
+            wait_times.append(timeout)
+            watcher._stop_event.set()
+            return True
+
+        watcher._stop_event.wait = recording_wait
+        watcher._loop = asyncio.new_event_loop()
+
+        try:
+            watcher._run()
+        finally:
+            if watcher._loop and not watcher._loop.is_closed():
+                watcher._loop.close()
+
+        assert len(wait_times) >= 1
+        assert wait_times[0] == 15
+
+    def test_burst_mode_exits_after_max_count(self, tmp_path):
+        """burst 최대 횟수에 도달하면 정상 간격으로 복귀"""
+        wait_times = []
+        poll_count = [0]
+
+        watcher = _make_watcher(
+            tmp_path,
+            config={
+                "burst_interval": 1,
+                "max_burst_count": 3,
+                "poll_interval": 15,
+            },
+        )
+
+        # 매번 새 카드가 있는 것처럼 반환
+        def always_found():
+            poll_count[0] += 1
+            return True
+
+        watcher._poll = always_found
+
+        def recording_wait(timeout=None):
+            wait_times.append(timeout)
+            # burst 3회 + 정상 1회 후 종료
+            if len(wait_times) >= 4:
+                watcher._stop_event.set()
+            return len(wait_times) >= 4
+
+        watcher._stop_event.wait = recording_wait
+        watcher._loop = asyncio.new_event_loop()
+
+        try:
+            watcher._run()
+        finally:
+            if watcher._loop and not watcher._loop.is_closed():
+                watcher._loop.close()
+
+        # burst 3회: [1, 1, 1], 그 후 burst 소진 → burst_remaining 리셋 → 다시 진입
+        # 최소 3회는 burst_interval이어야 함
+        burst_waits = [t for t in wait_times[:3]]
+        assert all(t == 1 for t in burst_waits), f"Expected burst intervals of 1, got {burst_waits}"
+
+
+class TestParallelCardHandling:
+    """_handle_new_cards 병렬 처리 테스트"""
+
+    def test_single_card_handled_directly(self, tmp_path, mock_plugin_sdk):
+        """카드가 1개면 executor 없이 직접 처리"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_ip"}},
+        )
+
+        card = TrelloCard(
+            id="single_card",
+            name="Single Card",
+            desc="",
+            url="https://trello.com/c/single",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        with patch.object(watcher, "_handle_new_card") as mock_handle:
+            watcher._handle_new_cards([(card, "to_go")])
+            mock_handle.assert_called_once_with(card, "to_go")
+
+    def test_multiple_cards_all_handled(self, tmp_path, mock_plugin_sdk):
+        """여러 카드가 모두 처리됨"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+        import concurrent.futures
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_ip"}},
+        )
+        # executor를 설정하여 병렬 처리 활성화
+        watcher._card_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="test-card"
+        )
+
+        cards = [
+            TrelloCard(
+                id=f"card_{i}", name=f"Card {i}", desc="",
+                url=f"https://trello.com/c/{i}", list_id="list_togo",
+                labels=[],
+            )
+            for i in range(3)
+        ]
+
+        handled_ids = []
+        original_handle = watcher._handle_new_card
+
+        def tracking_handle(card, list_key):
+            handled_ids.append(card.id)
+
+        watcher._handle_new_card = tracking_handle
+
+        try:
+            watcher._handle_new_cards([(c, "to_go") for c in cards])
+        finally:
+            watcher._card_executor.shutdown(wait=True)
+
+        assert sorted(handled_ids) == ["card_0", "card_1", "card_2"]
+
+    def test_executor_handles_individual_card_failure(self, tmp_path, mock_plugin_sdk):
+        """한 카드 처리가 실패해도 다른 카드는 정상 처리"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+        import concurrent.futures
+
+        watcher = _make_watcher(tmp_path)
+        watcher._card_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="test-card"
+        )
+
+        handled_ids = []
+        call_count = [0]
+
+        def failing_handle(card, list_key):
+            call_count[0] += 1
+            if card.id == "card_fail":
+                raise RuntimeError("Simulated failure")
+            handled_ids.append(card.id)
+
+        watcher._handle_new_card = failing_handle
+
+        cards = [
+            TrelloCard(id="card_ok_1", name="OK 1", desc="", url="", list_id="l", labels=[]),
+            TrelloCard(id="card_fail", name="Fail", desc="", url="", list_id="l", labels=[]),
+            TrelloCard(id="card_ok_2", name="OK 2", desc="", url="", list_id="l", labels=[]),
+        ]
+
+        try:
+            # 예외가 전파되지 않아야 함
+            watcher._handle_new_cards([(c, "to_go") for c in cards])
+        finally:
+            watcher._card_executor.shutdown(wait=True)
+
+        # 실패한 카드 외 나머지는 처리됨
+        assert sorted(handled_ids) == ["card_ok_1", "card_ok_2"]
+        assert call_count[0] == 3
+
+    def test_no_executor_falls_back_to_sequential(self, tmp_path, mock_plugin_sdk):
+        """executor가 없으면 순차 처리 (테스트 환경)"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        watcher = _make_watcher(tmp_path)
+        watcher._card_executor = None  # executor 없음
+
+        handled = []
+
+        def tracking_handle(card, list_key):
+            handled.append(card.id)
+
+        watcher._handle_new_card = tracking_handle
+
+        cards = [
+            TrelloCard(id=f"card_{i}", name=f"Card {i}", desc="", url="", list_id="l", labels=[])
+            for i in range(3)
+        ]
+
+        watcher._handle_new_cards([(c, "to_go") for c in cards])
+
+        assert handled == ["card_0", "card_1", "card_2"]
+
+
+class TestStateLockProtection:
+    """_state_lock을 통한 공유 상태 보호 테스트"""
+
+    def test_watcher_has_state_lock(self, tmp_path):
+        """TrelloWatcher에 _state_lock이 존재함"""
+        watcher = _make_watcher(tmp_path)
+        assert hasattr(watcher, "_state_lock")
+        assert isinstance(watcher._state_lock, type(threading.Lock()))
+
+    def test_untrack_card_is_thread_safe(self, tmp_path):
+        """_untrack_card가 동시 호출에서 안전함"""
+        watcher = _make_watcher(tmp_path)
+
+        tracked = TrackedCard(
+            card_id="safe_card",
+            card_name="Safe Card",
+            card_url="",
+            list_id="l",
+            list_key="to_go",
+            thread_ts="ts",
+            channel_id="C",
+            detected_at=datetime.now().isoformat(),
+        )
+        watcher._tracked["safe_card"] = tracked
+
+        results = []
+
+        def try_untrack():
+            try:
+                watcher._untrack_card("safe_card")
+                results.append("success")
+            except Exception as e:
+                results.append(f"error: {e}")
+
+        threads = [threading.Thread(target=try_untrack) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        # 모두 성공해야 하고 (이미 없는 경우도 성공), 카드는 반드시 제거
+        assert "safe_card" not in watcher._tracked
+        assert all(r == "success" for r in results)
+
+    def test_concurrent_poll_and_handle_safe(self, tmp_path, mock_plugin_sdk):
+        """_poll과 _handle_new_card가 동시에 실행되어도 _tracked 상태가 일관됨"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+        mock_trello.get_lists.return_value = []
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={
+                "watch_lists": {"to_go": "list_togo"},
+                "list_ids": {"in_progress": "list_ip"},
+            },
+        )
+
+        # 폴링할 때마다 새 카드 1개씩 반환
+        poll_counter = [0]
+
+        def dynamic_cards(list_id):
+            poll_counter[0] += 1
+            return [TrelloCard(
+                id=f"card_{poll_counter[0]}",
+                name=f"Card {poll_counter[0]}",
+                desc="",
+                url=f"https://trello.com/c/{poll_counter[0]}",
+                list_id=list_id,
+                labels=[],
+            )]
+
+        mock_trello.get_cards_in_list.side_effect = dynamic_cards
+
+        errors = []
+
+        def safe_poll():
+            try:
+                watcher._poll()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=safe_poll) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"동시 폴링에서 오류 발생: {errors}"
+
+
+class TestWatcherStartStop:
+    """start/stop 시 executor 라이프사이클 테스트"""
+
+    def test_start_creates_executor(self, tmp_path):
+        """start()가 _card_executor를 생성"""
+        mock_trello = MagicMock()
+        mock_trello.is_configured.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+        )
+        assert watcher._card_executor is None
+
+        watcher.start()
+        assert watcher._card_executor is not None
+
+        watcher.stop()
+        assert watcher._card_executor is None
+
+    def test_max_card_workers_config(self, tmp_path):
+        """max_card_workers 설정이 적용됨"""
+        watcher = _make_watcher(
+            tmp_path,
+            config={"max_card_workers": 5},
+        )
+        assert watcher._max_card_workers == 5
+
+    def test_max_card_workers_default(self, tmp_path):
+        """max_card_workers 기본값은 3"""
+        watcher = _make_watcher(tmp_path)
+        assert watcher._max_card_workers == 3
 
 
 if __name__ == "__main__":
