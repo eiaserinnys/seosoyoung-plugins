@@ -820,15 +820,25 @@ async def _execute_intervene(
         thread_buffers=thread_buffers,
     )
 
-    # 4. 응답 생성
+    # 4. 응답 생성 (Soulstream 경유 Claude Code)
     try:
-        if llm_call:
-            response_text = await llm_call(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
+        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
+        # 스레드 대상이면 해당 ts, 채널 대상이면 트리거 메시지 ts를 세션 키로 사용
+        run_thread_ts = (
+            action.target
+            if action.target and action.target != "channel"
+            else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
+        )
+        result = await soulstream.run(
+            prompt=combined_prompt,
+            channel=channel_id,
+            thread_ts=run_thread_ts,
+            text_only=True,
+        )
+        if result.ok:
+            response_text = result.output
         else:
-            logger.warning(f"intervene: llm_call이 없음 ({channel_id})")
+            logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")
             _remove_thinking_reaction(channel_id, reaction_ts)
             return
     except Exception as e:

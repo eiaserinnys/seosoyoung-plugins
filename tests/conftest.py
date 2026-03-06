@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from seosoyoung.plugin_sdk.slack import SendMessageResult, ReactionResult
+from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
 
 
 @pytest.fixture
@@ -14,6 +15,15 @@ def sample_config() -> dict:
         "enabled": True,
         "debug": False,
     }
+
+
+def _make_default_soulstream_run_mock(output: str = "mock soulstream response"):
+    """soulstream.run()의 기본 mock을 생성합니다."""
+    return AsyncMock(return_value=RunResult(
+        ok=True,
+        status=RunStatus.COMPLETED,
+        output=output,
+    ))
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +41,8 @@ def mock_plugin_sdk():
          patch("seosoyoung_plugins.channel_observer.pipeline.slack", mock_slack), \
          patch("seosoyoung_plugins.trello.plugin.slack", mock_slack), \
          patch("seosoyoung_plugins.trello.watcher.slack", mock_slack), \
-         patch("seosoyoung.plugin_sdk.soulstream") as mock_soulstream:
+         patch("seosoyoung.plugin_sdk.soulstream") as mock_soulstream, \
+         patch("seosoyoung_plugins.channel_observer.pipeline.soulstream", mock_soulstream):
 
         # slack methods are async, return dataclass objects
         mock_slack.send_message = AsyncMock(
@@ -40,8 +51,12 @@ def mock_plugin_sdk():
         mock_slack.add_reaction = AsyncMock(
             return_value=ReactionResult(ok=True)
         )
+        mock_slack.remove_reaction = AsyncMock(
+            return_value=ReactionResult(ok=True)
+        )
 
         # soulstream methods are async
+        mock_soulstream.run = _make_default_soulstream_run_mock()
         mock_soulstream.get_session_id = AsyncMock(return_value=None)
         mock_soulstream.compact = AsyncMock()
         mock_soulstream.update_session_id = AsyncMock()
