@@ -176,8 +176,24 @@ class TestListRunner:
             assert session.list_id == "list_abc123"
             assert session.list_name == "📦 Backlog"
             assert session.card_ids == ["card1", "card2", "card3"]
-            assert session.status == SessionStatus.PENDING
+            assert session.status == SessionStatus.RUNNING
             assert session.session_id in runner.sessions
+
+    def test_create_session_with_custom_initial_status(self):
+        """초기 상태를 지정하여 세션 생성"""
+        from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ListRunner(data_dir=Path(tmpdir))
+
+            session = runner.create_session(
+                list_id="list_abc123",
+                list_name="📦 Backlog",
+                card_ids=["card1"],
+                initial_status=SessionStatus.PENDING,
+            )
+
+            assert session.status == SessionStatus.PENDING
 
     def test_get_session(self):
         """세션 조회"""
@@ -271,27 +287,29 @@ class TestListRunner:
             assert s1.session_id in session_ids
             assert s3.session_id in session_ids
 
-    def test_pending_session_included_in_active(self):
-        """PENDING 상태의 세션도 활성 세션으로 포함되어야 함
+    def test_pending_session_excluded_from_active(self):
+        """PENDING 상태의 세션은 활성 세션에 포함되지 않아야 함
 
-        create_session() 직후 (PENDING) ~ 첫 카드 처리 시작 (RUNNING) 사이의
-        경쟁 조건에서 동일 리스트의 중복 정주행을 방지하기 위함.
+        PENDING 세션이 활성 세션에 포함되면, 세션 시작 실패 시
+        해당 리스트의 정주행이 영구 차단되는 데드락이 발생합니다.
+        중복 정주행 방지는 watcher의 _list_run_lock이 담당합니다.
         """
         from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
 
         with tempfile.TemporaryDirectory() as tmpdir:
             runner = ListRunner(data_dir=Path(tmpdir))
 
-            # 세션 생성 직후 (PENDING 상태)
-            s1 = runner.create_session("list1", "List 1", ["card1"])
+            # PENDING 상태로 세션 생성
+            s1 = runner.create_session(
+                "list1", "List 1", ["card1"],
+                initial_status=SessionStatus.PENDING,
+            )
             assert s1.status == SessionStatus.PENDING
 
             active = runner.get_active_sessions()
 
-            # PENDING도 활성 세션에 포함되어야 함
-            assert len(active) == 1
-            assert active[0].session_id == s1.session_id
-            assert active[0].list_id == "list1"
+            # PENDING은 활성 세션에 포함되지 않아야 함
+            assert len(active) == 0
 
     def test_mark_card_processed(self):
         """카드 처리 완료 표시"""
@@ -418,7 +436,7 @@ class TestStartRunByName:
             assert result.list_id == "list_123"
             assert result.list_name == "📦 Backlog"
             assert result.card_ids == ["card_a", "card_b"]
-            assert result.status == SessionStatus.PENDING
+            assert result.status == SessionStatus.RUNNING
 
     def test_start_run_by_name_not_found(self):
         """리스트 이름으로 정주행 시작 - 리스트 없음"""
@@ -1120,10 +1138,8 @@ class TestStateTransitions:
                 card_ids=["card_a"],
             )
 
-            # PENDING -> RUNNING
-            assert session.status == SessionStatus.PENDING
-            runner.update_session_status(session.session_id, SessionStatus.RUNNING)
-            assert runner.get_session(session.session_id).status == SessionStatus.RUNNING
+            # create_session의 기본 상태는 RUNNING
+            assert session.status == SessionStatus.RUNNING
 
             # RUNNING -> PAUSED (via pause_run)
             runner.pause_run(session.session_id, "테스트 중단")
@@ -1325,13 +1341,18 @@ class TestCheckRunListLabels:
             # _start_list_run이 호출되어야 함
             mock_start.assert_called_once()
             call_args = mock_start.call_args
-            # 첫 번째 인자: list_id, list_name, cards
+            # 인자: list_id, list_name, cards, trigger_card
             assert call_args[0][0] == "list_backlog"
             assert call_args[0][1] == "📦 Backlog"
             assert len(call_args[0][2]) == 3  # 전체 카드 목록
+            assert call_args[0][3].id == "card_1"  # trigger_card
 
-    def test_check_run_list_labels_removes_label(self, tmp_path):
-        """레이블 감지 후 첫 카드에서 레이블 제거"""
+    def test_check_run_list_labels_does_not_remove_label(self, tmp_path):
+        """_check_run_list_labels는 레이블을 직접 제거하지 않음
+
+        레이블 제거는 _start_list_run() 내부에서 수행되므로,
+        _check_run_list_labels() 자체는 remove_label_from_card를 호출하지 않는다.
+        """
         from seosoyoung_plugins.trello.client import TrelloCard
         from unittest.mock import patch
 
@@ -1349,17 +1370,14 @@ class TestCheckRunListLabels:
                 labels=[{"id": "run_label_id", "name": "🏃 Run List", "color": "green"}],
             ),
         ]
-        mock_trello.remove_label_from_card.return_value = True
 
         watcher = _make_watcher(tmp_path, trello_client=mock_trello)
 
         with patch.object(watcher, "_start_list_run"):
             watcher._check_run_list_labels()
 
-            # 레이블 제거 호출 확인
-            mock_trello.remove_label_from_card.assert_called_once_with(
-                "card_1", "run_label_id"
-            )
+            # 레이블 제거는 _start_list_run 내부에서 수행됨
+            mock_trello.remove_label_from_card.assert_not_called()
 
     def test_check_run_list_labels_no_trigger(self, tmp_path):
         """🏃 Run List 레이블 없으면 정주행 시작 안 함"""
@@ -1438,7 +1456,7 @@ class TestStartListRunIntegration:
         assert session.list_id == "list_backlog"
         assert session.list_name == "📦 Backlog"
         assert session.card_ids == ["card_1", "card_2"]
-        assert session.status == SessionStatus.PENDING
+        assert session.status == SessionStatus.RUNNING
 
     def test_start_list_run_without_list_runner(self, tmp_path):
         """ListRunner 없이 _start_list_run 호출 시 경고 로그"""
@@ -1781,8 +1799,12 @@ class TestLabelGuardOrdering:
             mock_start.assert_not_called()
             mock_trello.remove_label_from_card.assert_not_called()
 
-    def test_label_removed_when_no_active_session(self, tmp_path):
-        """활성 세션이 없으면 레이블 제거 후 정주행 시작"""
+    def test_start_list_run_called_when_no_active_session(self, tmp_path):
+        """활성 세션이 없으면 trigger_card와 함께 정주행 시작
+
+        레이블 제거는 _start_list_run 내부에서 수행되므로,
+        _check_run_list_labels는 trigger_card를 전달만 한다.
+        """
         from seosoyoung_plugins.trello.list_runner import ListRunner
         from seosoyoung_plugins.trello.client import TrelloCard
         from unittest.mock import patch
@@ -1803,7 +1825,6 @@ class TestLabelGuardOrdering:
                 labels=[{"id": "run_label", "name": "🏃 Run List", "color": "green"}],
             ),
         ]
-        mock_trello.remove_label_from_card.return_value = True
 
         watcher = _make_watcher(
             tmp_path,
@@ -1814,8 +1835,115 @@ class TestLabelGuardOrdering:
         with patch.object(watcher, "_start_list_run") as mock_start:
             watcher._check_run_list_labels()
 
-            mock_trello.remove_label_from_card.assert_called_once()
             mock_start.assert_called_once()
+            # trigger_card가 4번째 인자로 전달됨
+            trigger_card = mock_start.call_args[0][3]
+            assert trigger_card.id == "card_1"
+            # _check_run_list_labels 자체는 레이블 제거 안 함
+            mock_trello.remove_label_from_card.assert_not_called()
+
+
+class TestRunListDeadlockFix:
+    """리스트 정주행 데드락 수정 검증 테스트"""
+
+    def test_pending_session_does_not_block_redetection(self):
+        """PENDING 세션이 있어도 같은 리스트의 정주행을 다시 감지할 수 있음
+
+        데드락 시나리오: 세션 생성 후 워커 할당 실패 시 PENDING 세션이
+        남아있으면, get_active_sessions()에서 이를 활성 세션으로 반환하여
+        같은 리스트의 재감지가 영구 차단됨.
+
+        수정: PENDING을 get_active_sessions()에서 제외하여 데드락 방지.
+        """
+        from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ListRunner(data_dir=Path(tmpdir))
+
+            # PENDING 상태 세션이 남아있는 상황 (이전 시도 실패 잔여물)
+            orphan = runner.create_session(
+                "list_plan", "📌 PLAN", ["card1"],
+                initial_status=SessionStatus.PENDING,
+            )
+            assert orphan.status == SessionStatus.PENDING
+
+            # get_active_sessions에서 PENDING은 제외됨
+            active = runner.get_active_sessions()
+            active_list_ids = {s.list_id for s in active}
+            assert "list_plan" not in active_list_ids
+
+            # 따라서 같은 리스트에 새 세션 생성 가능
+            new_session = runner.create_session(
+                "list_plan", "📌 PLAN", ["card1", "card2"],
+            )
+            assert new_session.status == SessionStatus.RUNNING
+
+    def test_start_list_run_removes_label_after_session_creation(self, tmp_path):
+        """_start_list_run이 세션 생성 후 레이블을 제거하는 순서 검증
+
+        기존: _check_run_list_labels에서 레이블 제거 → _start_list_run 호출
+        수정: _start_list_run 내부에서 세션 생성 → 레이블 제거 (이 순서)
+        """
+        from seosoyoung_plugins.trello.list_runner import ListRunner
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        list_runner = ListRunner(data_dir=tmp_path)
+        mock_trello = MagicMock()
+        mock_trello.remove_label_from_card.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            list_runner_ref=lambda: list_runner,
+        )
+
+        trigger_card = TrelloCard(
+            id="card_1", name="First Card", desc="",
+            url="", list_id="list_plan",
+            labels=[{"id": "run_label", "name": "🏃 Run List", "color": "green"}],
+        )
+        cards = [trigger_card]
+
+        watcher._start_list_run("list_plan", "📌 PLAN", cards, trigger_card)
+
+        # 세션이 RUNNING 상태로 생성됨
+        sessions = list(list_runner.sessions.values())
+        assert len(sessions) == 1
+        assert sessions[0].status.value == "running"
+
+        # 레이블 제거 호출됨
+        mock_trello.remove_label_from_card.assert_called_once_with(
+            "card_1", "run_label"
+        )
+
+    def test_start_list_run_continues_on_label_removal_failure(self, tmp_path):
+        """레이블 제거 실패해도 정주행은 계속 진행"""
+        from seosoyoung_plugins.trello.list_runner import ListRunner
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        list_runner = ListRunner(data_dir=tmp_path)
+        mock_trello = MagicMock()
+        mock_trello.remove_label_from_card.return_value = False  # 실패
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            list_runner_ref=lambda: list_runner,
+        )
+
+        trigger_card = TrelloCard(
+            id="card_1", name="First Card", desc="",
+            url="", list_id="list_plan",
+            labels=[{"id": "run_label", "name": "🏃 Run List", "color": "green"}],
+        )
+        cards = [trigger_card]
+
+        watcher._start_list_run("list_plan", "📌 PLAN", cards, trigger_card)
+
+        # 레이블 제거 실패해도 세션은 생성됨
+        sessions = list(list_runner.sessions.values())
+        assert len(sessions) == 1
+        assert sessions[0].status.value == "running"
 
 
 if __name__ == "__main__":

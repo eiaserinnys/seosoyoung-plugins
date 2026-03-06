@@ -181,6 +181,8 @@ class ListRunner:
         list_id: str,
         list_name: str,
         card_ids: list[str],
+        *,
+        initial_status: SessionStatus = SessionStatus.RUNNING,
     ) -> ListRunSession:
         """새 정주행 세션 생성
 
@@ -188,6 +190,10 @@ class ListRunner:
             list_id: 트렐로 리스트 ID
             list_name: 트렐로 리스트 이름
             card_ids: 처리할 카드 ID 목록 (순서대로)
+            initial_status: 초기 세션 상태 (기본값: RUNNING).
+                PENDING으로 생성하면 워커 할당 실패 시 해당 리스트의
+                정주행이 영구 차단될 수 있으므로, 실행이 확정된 시점에
+                RUNNING으로 생성하는 것을 권장합니다.
 
         Returns:
             생성된 세션
@@ -198,7 +204,7 @@ class ListRunner:
             list_id=list_id,
             list_name=list_name,
             card_ids=card_ids,
-            status=SessionStatus.PENDING,
+            status=initial_status,
             created_at=datetime.now().isoformat(),
         )
         self.sessions[session_id] = session
@@ -250,9 +256,12 @@ class ListRunner:
     def get_active_sessions(self) -> list[ListRunSession]:
         """활성 세션 목록 조회
 
-        PENDING, RUNNING, PAUSED, VERIFYING 상태인 세션만 반환합니다.
-        PENDING을 포함하는 이유: create_session() 직후~첫 카드 처리 시작 전
-        사이의 경쟁 조건에서 동일 리스트의 중복 정주행을 방지하기 위함.
+        RUNNING, PAUSED, VERIFYING 상태인 세션만 반환합니다.
+        PENDING은 포함하지 않습니다. 중복 정주행 방지는 watcher의
+        _list_run_lock (threading.Lock)이 담당하므로, PENDING 세션이
+        활성 목록에 포함될 필요가 없습니다. PENDING을 포함하면
+        세션 시작 실패 시 해당 리스트의 정주행이 영구 차단되는
+        데드락이 발생합니다.
         조회 전 좀비 세션을 자동 정리합니다.
 
         Returns:
@@ -260,7 +269,6 @@ class ListRunner:
         """
         self._cleanup_zombie_sessions()
         active_statuses = {
-            SessionStatus.PENDING,
             SessionStatus.RUNNING,
             SessionStatus.PAUSED,
             SessionStatus.VERIFYING,
