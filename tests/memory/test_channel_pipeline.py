@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
 from seosoyoung.slackbot.soulstream.session import SessionManager
 from seosoyoung_plugins.channel_observer.intervention import InterventionAction, InterventionHistory
 from seosoyoung_plugins.channel_observer.observer import (
@@ -334,8 +335,8 @@ class TestRunChannelPipeline:
             llm_call=mock_llm,
         )
 
-        # LLM이 호출되고 슬랙에 발송됨
-        mock_llm.assert_called_once()
+        # soulstream.run이 호출되고 슬랙에 발송됨
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
         mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
@@ -480,7 +481,7 @@ class TestProbabilityBasedIntervention:
             llm_call=mock_llm,
         )
 
-        mock_llm.assert_called_once()
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_threshold_one_blocks_most(self, store, channel_id, mock_plugin_sdk):
@@ -506,7 +507,7 @@ class TestProbabilityBasedIntervention:
         )
 
         # 임계치 1.0은 (importance/10) * prob < 1.0이므로 차단
-        mock_llm.assert_not_called()
+        mock_plugin_sdk["soulstream"].run.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_probability_debug_log_sent(self, store, channel_id, mock_plugin_sdk):
@@ -602,7 +603,7 @@ class TestMultiJudgePipeline:
         # react 실행됨
         mock_plugin_sdk["slack"].add_reaction.assert_called_once()
         # intervene도 실행됨
-        mock_llm.assert_called_once()
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_multi_all_none(self, store, channel_id, mock_plugin_sdk):
@@ -707,7 +708,7 @@ class TestMultiJudgePipeline:
         # react는 실행됨
         mock_plugin_sdk["slack"].add_reaction.assert_called_once()
         # intervene은 차단됨
-        mock_llm.assert_not_called()
+        mock_plugin_sdk["soulstream"].run.assert_not_awaited()
 
 
 # ── _apply_importance_modifiers 테스트 ──────────────────
@@ -866,6 +867,11 @@ class TestBotResponseRecordedInJudged:
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
 
+        # soulstream mock 응답 설정
+        mock_plugin_sdk["soulstream"].run.return_value = RunResult(
+            ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+        )
+
         # 특정 ts 반환하도록 설정
         mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
             ok=True, ts="9999.000", channel=channel_id
@@ -907,6 +913,11 @@ class TestInterventionSessionCreation:
         ))
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
+
+        # soulstream mock 응답 설정
+        mock_plugin_sdk["soulstream"].run.return_value = RunResult(
+            ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+        )
 
         # 특정 ts 반환하도록 설정
         mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
@@ -950,6 +961,11 @@ class TestInterventionSessionCreation:
         ))
         history = InterventionHistory(base_dir=store.base_dir)
         mock_llm = AsyncMock(return_value="개입 메시지입니다.")
+
+        # soulstream mock 응답 설정
+        mock_plugin_sdk["soulstream"].run.return_value = RunResult(
+            ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+        )
 
         # 특정 ts 반환하도록 설정
         mock_plugin_sdk["slack"].send_message.return_value = SendMessageResult(
@@ -1240,8 +1256,8 @@ class TestBugC_InterveneFallbackPrevention:
             llm_call=mock_llm,
         )
 
-        # target을 찾지 못했으므로 LLM 호출과 메시지 발송이 없어야 함
-        mock_llm.assert_not_called()
+        # target을 찾지 못했으므로 soulstream 호출과 메시지 발송이 없어야 함
+        mock_plugin_sdk["soulstream"].run.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_intervene_finds_target_in_thread_buffers(self, store, channel_id, mock_plugin_sdk):
@@ -1270,8 +1286,8 @@ class TestBugC_InterveneFallbackPrevention:
             llm_call=mock_llm,
         )
 
-        # thread_buffers에서 찾았으므로 LLM이 호출되어야 함
-        mock_llm.assert_called_once()
+        # thread_buffers에서 찾았으므로 soulstream이 호출되어야 함
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
         mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
@@ -1299,8 +1315,8 @@ class TestBugC_InterveneFallbackPrevention:
             llm_call=mock_llm,
         )
 
-        # judged에서 찾았으므로 LLM이 호출되어야 함
-        mock_llm.assert_called_once()
+        # judged에서 찾았으므로 soulstream이 호출되어야 함
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
 
 
 # ── Bug D: non-pending JudgeItem 필터링 ──
@@ -1342,8 +1358,8 @@ class TestBugD_FilterNonPendingJudgeItems:
         assert mock_plugin_sdk["slack"].add_reaction.call_count == 1
         call_kwargs = mock_plugin_sdk["slack"].add_reaction.call_args[1]
         assert call_kwargs["ts"] == "1001.000"
-        # THREAD.999 intervene은 필터링되어 LLM 호출 없음
-        mock_llm.assert_not_called()
+        # THREAD.999 intervene은 필터링되어 soulstream 호출 없음
+        mock_plugin_sdk["soulstream"].run.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_all_pending_items_preserved(self, store, channel_id, mock_plugin_sdk):
