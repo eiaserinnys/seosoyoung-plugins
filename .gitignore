@@ -73,3 +73,7 @@ coverage.xml
 tmp/
 temp/
 tmpclaude-*
+
+# Plugin configs (environment-specific)
+config/*.yaml
+!config/*.example
