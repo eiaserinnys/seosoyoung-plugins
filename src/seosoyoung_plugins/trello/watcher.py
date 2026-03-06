@@ -171,12 +171,27 @@ class TrelloWatcher:
         except Exception as e:
             logger.error(f"추적 상태 저장 실패: {e}")
 
+    _THREAD_CARD_REQUIRED_FIELDS = {"thread_ts", "channel_id", "card_id", "card_name", "card_url"}
+
     def _load_thread_cards(self):
-        """스레드-카드 매핑 로드"""
+        """스레드-카드 매핑 로드
+
+        필수 필드가 누락된 항목은 기본값으로 보완하여 로드한다.
+        """
         if self.thread_cards_file.exists():
             try:
                 data = json.loads(self.thread_cards_file.read_text(encoding="utf-8"))
                 for thread_ts, info_data in data.items():
+                    # 필수 필드 기본값 보완
+                    for field in self._THREAD_CARD_REQUIRED_FIELDS:
+                        if field not in info_data:
+                            info_data[field] = ""
+                    if "session_id" not in info_data:
+                        info_data["session_id"] = None
+                    if "has_execute" not in info_data:
+                        info_data["has_execute"] = False
+                    if "created_at" not in info_data:
+                        info_data["created_at"] = ""
                     self._thread_cards[thread_ts] = ThreadCardInfo(**info_data)
                 logger.info(f"스레드-카드 매핑 로드: {len(self._thread_cards)}개")
             except Exception as e:
@@ -210,11 +225,18 @@ class TrelloWatcher:
         logger.debug(f"스레드-카드 매핑 등록: {tracked.thread_ts} -> {tracked.card_name}")
 
     def _untrack_card(self, card_id: str):
-        """카드 추적 해제"""
+        """카드 추적 해제
+
+        _tracked와 _thread_cards를 함께 정리하여 orphan 데이터를 방지한다.
+        """
         with self._state_lock:
             if card_id in self._tracked:
                 tracked = self._tracked.pop(card_id)
                 self._save_tracked()
+                # _thread_cards에서도 해당 카드의 매핑을 제거
+                if tracked.thread_ts in self._thread_cards:
+                    del self._thread_cards[tracked.thread_ts]
+                    self._save_thread_cards()
                 logger.info(f"카드 추적 해제: {tracked.card_name}")
 
     def update_thread_card_session_id(self, thread_ts: str, session_id: str) -> bool:
@@ -600,6 +622,17 @@ class TrelloWatcher:
         prompt = self.prompt_builder.build_to_go(card, has_execute)
         card_id_for_cleanup = card.id
         card_name_with_spinner = f"🌀 {card.name}"
+        original_list_id = card.list_id
+
+        def on_error(e):
+            # Claude 실행 실패 시 카드를 원래 리스트로 롤백
+            if original_list_id:
+                if self.trello.move_card(card_id_for_cleanup, original_list_id):
+                    logger.info(
+                        f"카드 원래 리스트로 롤백: {card.name} -> {original_list_id}"
+                    )
+                else:
+                    logger.warning(f"카드 롤백 실패: {card.name}")
 
         def on_finally():
             if self._remove_spinner_prefix(card_id_for_cleanup, card_name_with_spinner):
@@ -612,7 +645,7 @@ class TrelloWatcher:
             prompt=prompt, thread_ts=thread_ts,
             channel=msg_channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
-            on_finally=on_finally,
+            on_error=on_error, on_finally=on_finally,
         )
 
     def build_reaction_execute_prompt(self, info: ThreadCardInfo) -> str:

@@ -1861,5 +1861,321 @@ class TestWatcherStartStop:
         assert watcher._max_card_workers == 3
 
 
+class TestUntrackCardCleansThreadCards:
+    """_untrack_card가 _thread_cards도 함께 정리하는지 테스트"""
+
+    def test_untrack_removes_thread_card_mapping(self, tmp_path):
+        """_untrack_card가 _tracked와 _thread_cards 양쪽에서 카드를 제거"""
+        from seosoyoung_plugins.trello.watcher import ThreadCardInfo
+
+        watcher = _make_watcher(tmp_path)
+
+        tracked = TrackedCard(
+            card_id="card_cleanup",
+            card_name="Cleanup Card",
+            card_url="https://trello.com/c/cleanup",
+            list_id="list_test",
+            list_key="to_go",
+            thread_ts="ts_cleanup",
+            channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+        watcher._tracked["card_cleanup"] = tracked
+        watcher._register_thread_card(tracked)
+
+        # 사전 조건: 양쪽 모두 등록되어 있어야 함
+        assert "card_cleanup" in watcher._tracked
+        assert "ts_cleanup" in watcher._thread_cards
+
+        watcher._untrack_card("card_cleanup")
+
+        # 양쪽 모두 제거되어야 함
+        assert "card_cleanup" not in watcher._tracked
+        assert "ts_cleanup" not in watcher._thread_cards
+
+    def test_untrack_persists_thread_cards_removal(self, tmp_path):
+        """_untrack_card가 _thread_cards 변경을 파일에 저장"""
+        watcher = _make_watcher(tmp_path)
+
+        tracked = TrackedCard(
+            card_id="card_persist",
+            card_name="Persist Card",
+            card_url="https://trello.com/c/persist",
+            list_id="list_test",
+            list_key="to_go",
+            thread_ts="ts_persist",
+            channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+        watcher._tracked["card_persist"] = tracked
+        watcher._register_thread_card(tracked)
+
+        watcher._untrack_card("card_persist")
+
+        # 새 인스턴스로 로드해도 _thread_cards에 남아있지 않아야 함
+        watcher2 = _make_watcher(tmp_path)
+        assert "ts_persist" not in watcher2._thread_cards
+
+    def test_untrack_nonexistent_card_is_safe(self, tmp_path):
+        """존재하지 않는 카드를 untrack해도 에러 없음"""
+        watcher = _make_watcher(tmp_path)
+
+        # _thread_cards에 직접 항목을 넣어두고
+        from seosoyoung_plugins.trello.watcher import ThreadCardInfo
+        watcher._thread_cards["ts_orphan"] = ThreadCardInfo(
+            thread_ts="ts_orphan",
+            channel_id="C12345",
+            card_id="card_orphan",
+            card_name="Orphan",
+            card_url="",
+        )
+
+        # 존재하지 않는 card_id로 untrack — 에러 없이 통과해야 함
+        watcher._untrack_card("nonexistent_card")
+
+        # orphan은 그대로 (다른 card_id이므로)
+        assert "ts_orphan" in watcher._thread_cards
+
+    def test_untrack_does_not_remove_other_thread_cards(self, tmp_path):
+        """한 카드를 untrack해도 다른 카드의 thread_card 매핑은 유지"""
+        watcher = _make_watcher(tmp_path)
+
+        tracked_a = TrackedCard(
+            card_id="card_a", card_name="Card A",
+            card_url="", list_id="l", list_key="to_go",
+            thread_ts="ts_a", channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+        tracked_b = TrackedCard(
+            card_id="card_b", card_name="Card B",
+            card_url="", list_id="l", list_key="to_go",
+            thread_ts="ts_b", channel_id="C12345",
+            detected_at="2026-01-01T00:00:00",
+        )
+        watcher._tracked["card_a"] = tracked_a
+        watcher._tracked["card_b"] = tracked_b
+        watcher._register_thread_card(tracked_a)
+        watcher._register_thread_card(tracked_b)
+
+        watcher._untrack_card("card_a")
+
+        assert "card_a" not in watcher._tracked
+        assert "ts_a" not in watcher._thread_cards
+        # card_b는 그대로 유지
+        assert "card_b" in watcher._tracked
+        assert "ts_b" in watcher._thread_cards
+
+
+class TestLoadThreadCardsFieldValidation:
+    """_load_thread_cards 필드 검증 테스트"""
+
+    def test_missing_card_url_gets_default(self, tmp_path):
+        """card_url 필드가 없는 데이터 로드 시 빈 문자열로 보완"""
+        import json
+
+        thread_cards_file = tmp_path / "thread_cards.json"
+        thread_cards_file.write_text(json.dumps({
+            "ts_1": {
+                "thread_ts": "ts_1",
+                "channel_id": "C12345",
+                "card_id": "card_1",
+                "card_name": "Card 1",
+                # card_url 누락
+            }
+        }), encoding="utf-8")
+
+        watcher = _make_watcher(tmp_path)
+
+        assert "ts_1" in watcher._thread_cards
+        assert watcher._thread_cards["ts_1"].card_url == ""
+
+    def test_missing_multiple_fields_get_defaults(self, tmp_path):
+        """여러 필드가 누락된 데이터도 정상 로드"""
+        import json
+
+        thread_cards_file = tmp_path / "thread_cards.json"
+        thread_cards_file.write_text(json.dumps({
+            "ts_2": {
+                "thread_ts": "ts_2",
+                "channel_id": "C12345",
+                "card_id": "card_2",
+                # card_name, card_url, session_id, has_execute, created_at 누락
+            }
+        }), encoding="utf-8")
+
+        watcher = _make_watcher(tmp_path)
+
+        assert "ts_2" in watcher._thread_cards
+        info = watcher._thread_cards["ts_2"]
+        assert info.card_name == ""
+        assert info.card_url == ""
+        assert info.session_id is None
+        assert info.has_execute is False
+        assert info.created_at == ""
+
+    def test_complete_data_loads_normally(self, tmp_path):
+        """모든 필드가 있는 데이터는 정상 로드"""
+        import json
+
+        thread_cards_file = tmp_path / "thread_cards.json"
+        thread_cards_file.write_text(json.dumps({
+            "ts_3": {
+                "thread_ts": "ts_3",
+                "channel_id": "C12345",
+                "card_id": "card_3",
+                "card_name": "Complete Card",
+                "card_url": "https://trello.com/c/complete",
+                "session_id": "session_abc",
+                "has_execute": True,
+                "created_at": "2026-01-01T00:00:00",
+            }
+        }), encoding="utf-8")
+
+        watcher = _make_watcher(tmp_path)
+
+        info = watcher._thread_cards["ts_3"]
+        assert info.card_name == "Complete Card"
+        assert info.card_url == "https://trello.com/c/complete"
+        assert info.session_id == "session_abc"
+        assert info.has_execute is True
+
+
+class TestHandleNewCardRollback:
+    """_handle_new_card 실패 시 카드 롤백 테스트"""
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_claude_failure_rolls_back_card(self, tmp_path, mock_plugin_sdk):
+        """Claude 실행 실패 시 카드가 원래 리스트로 롤백됨"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            return_value=RunResult(
+                ok=False,
+                status=RunStatus.FAILED,
+                error="Rate limit exceeded",
+            )
+        )
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_inprogress"}},
+        )
+        # _loop를 새 이벤트 루프로 설정 (closed 방지)
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_rollback",
+            name="Rollback Card",
+            desc="",
+            url="https://trello.com/c/rollback",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        # move_card 호출 내역 확인:
+        # 1회: In Progress로 이동
+        # 2회: 원래 리스트(list_togo)로 롤백
+        move_calls = mock_trello.move_card.call_args_list
+        assert len(move_calls) >= 2
+        # 마지막 move_card는 원래 리스트로의 롤백이어야 함
+        rollback_call = move_calls[-1]
+        assert rollback_call[0] == ("card_rollback", "list_togo")
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_claude_success_does_not_rollback(self, tmp_path, mock_plugin_sdk):
+        """Claude 실행 성공 시 롤백이 발생하지 않음"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            return_value=RunResult(
+                ok=True,
+                status=RunStatus.COMPLETED,
+                session_id="session_abc",
+            )
+        )
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_inprogress"}},
+        )
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_success",
+            name="Success Card",
+            desc="",
+            url="https://trello.com/c/success",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        # move_card는 In Progress 이동 1회만 호출되어야 함
+        move_calls = mock_trello.move_card.call_args_list
+        assert len(move_calls) == 1
+        assert move_calls[0][0] == ("card_success", "list_inprogress")
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_claude_exception_rolls_back_card(self, tmp_path, mock_plugin_sdk):
+        """Claude 실행 중 예외 발생 시에도 카드가 원래 리스트로 롤백됨"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            side_effect=RuntimeError("Connection lost")
+        )
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_inprogress"}},
+        )
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_exception",
+            name="Exception Card",
+            desc="",
+            url="https://trello.com/c/exception",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        # 롤백 호출 확인
+        move_calls = mock_trello.move_card.call_args_list
+        assert len(move_calls) >= 2
+        rollback_call = move_calls[-1]
+        assert rollback_call[0] == ("card_exception", "list_togo")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
