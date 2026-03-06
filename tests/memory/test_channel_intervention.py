@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
     InterventionHistory,
@@ -658,6 +660,12 @@ class TestRunChannelPipeline:
             reaction_content="아이고, 무슨 소동이오?",
         ))
 
+        # soulstream mock 응답 설정
+        mock_plugin_sdk["soulstream"].run.return_value = RunResult(
+            ok=True, status=RunStatus.COMPLETED,
+            output="이런 일이 벌어지다니, 놀랍구려.",
+        )
+
         async def mock_llm_call(system_prompt, user_prompt):
             return "이런 일이 벌어지다니, 놀랍구려."
 
@@ -674,7 +682,7 @@ class TestRunChannelPipeline:
         mock_plugin_sdk["slack"].send_message.assert_called()
         call_args_list = mock_plugin_sdk["slack"].send_message.call_args_list
         sent_texts = [c[1]["text"] for c in call_args_list]
-        # LLM 생성 응답이 발송됨
+        # soulstream 생성 응답이 발송됨
         assert any("놀랍구려" in t for t in sent_texts)
 
     @pytest.mark.asyncio
@@ -791,6 +799,12 @@ class TestRunChannelPipeline:
             reaction_content="중요한 대화",
         ))
 
+        # soulstream mock 응답 설정
+        mock_plugin_sdk["soulstream"].run.return_value = RunResult(
+            ok=True, status=RunStatus.COMPLETED,
+            output="중요한 응답입니다.",
+        )
+
         async def mock_llm_call(system_prompt, user_prompt):
             return "중요한 응답입니다."
 
@@ -804,7 +818,7 @@ class TestRunChannelPipeline:
             llm_call=mock_llm_call,
         )
 
-        # LLM 응답이 채널에 발송됨
+        # soulstream 응답이 채널에 발송됨
         channel_calls = [
             c for c in mock_plugin_sdk["slack"].send_message.call_args_list
             if c[1].get("channel") == "C123"
