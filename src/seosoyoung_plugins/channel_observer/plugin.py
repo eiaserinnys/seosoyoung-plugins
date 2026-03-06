@@ -73,7 +73,6 @@ class ChannelObserverPlugin(Plugin):
         self._observer_engine = None
         self._compressor = None
         self._scheduler = None
-        self._mention_tracker = None
         self._llm_call = self._make_llm_call() if self._api_key else None
 
         logger.info(
@@ -107,7 +106,6 @@ class ChannelObserverPlugin(Plugin):
             logger.info("ChannelObserverPlugin: no channels configured")
             return HookResult.CONTINUE, None
 
-        self._mention_tracker = ctx.args.get("mention_tracker")
         self._bot_user_id = ctx.args.get("bot_user_id", "")
 
         from seosoyoung_plugins.channel_observer.store import (
@@ -131,7 +129,6 @@ class ChannelObserverPlugin(Plugin):
         self._collector = ChannelMessageCollector(
             store=self._store,
             target_channels=self._channels,
-            mention_tracker=self._mention_tracker,
             bot_user_id=self._bot_user_id,
         )
         self._cooldown = InterventionHistory(base_dir=self._memory_path)
@@ -160,7 +157,6 @@ class ChannelObserverPlugin(Plugin):
                 debug_channel=self._debug_channel,
                 intervention_threshold=self._intervention_threshold,
                 llm_call=self._llm_call,
-                mention_tracker=self._mention_tracker,
                 bot_user_id=self._bot_user_id,
             )
             self._scheduler.start()
@@ -332,7 +328,6 @@ class ChannelObserverPlugin(Plugin):
                             intervention_threshold=self._intervention_threshold,
                             llm_call=self._llm_call,
                             bot_user_id=self._bot_user_id,
-                            mention_tracker=self._mention_tracker,
                         )
                     )
                 finally:

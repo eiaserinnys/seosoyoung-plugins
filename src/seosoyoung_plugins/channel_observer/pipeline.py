@@ -13,7 +13,7 @@ import math
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from seosoyoung.plugin_sdk import slack, soulstream
+from seosoyoung.plugin_sdk import mention, slack, soulstream
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
     InterventionHistory,
@@ -278,7 +278,6 @@ async def run_channel_pipeline(
     intervention_threshold: float = 0.3,
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
-    mention_tracker=None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -370,11 +369,12 @@ async def run_channel_pipeline(
 
     # 멘션 스레드 식별: 리액션/개입 필터링에 사용 (소화는 정상 처리)
     mention_handled_ts: set[str] = set()
-    if mention_tracker:
+    _mention_available = mention.get_backend() is not None
+    if _mention_available:
         for m in pending_messages:
             thread = m.get("thread_ts", "")
             ts = m.get("ts", "")
-            if mention_tracker.is_handled(thread) or mention_tracker.is_handled(ts):
+            if mention.is_handled(thread) or mention.is_handled(ts):
                 mention_handled_ts.add(ts)
 
         # judge에는 멘션 스레드를 제외한 pending만 전달 (토큰 절약)
@@ -384,7 +384,7 @@ async def run_channel_pipeline(
         ]
         judge_thread_buffers = (
             {ts: msgs for ts, msgs in thread_buffers.items()
-             if not mention_tracker.is_handled(ts)}
+             if not mention.is_handled(ts)}
             if thread_buffers else thread_buffers
         )
         filtered_count = len(pending_messages) - len(judge_pending)

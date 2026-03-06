@@ -39,7 +39,6 @@ class ChannelDigestScheduler:
         debug_channel: str = "",
         intervention_threshold: float = 0.3,
         llm_call: Optional[Callable] = None,
-        mention_tracker=None,
         bot_user_id: str = "",
         **kwargs,
     ):
@@ -55,7 +54,6 @@ class ChannelDigestScheduler:
         self.debug_channel = debug_channel
         self.intervention_threshold = intervention_threshold
         self.llm_call = llm_call
-        self.mention_tracker = mention_tracker
         self.bot_user_id = bot_user_id
 
         self._timer: threading.Timer | None = None
@@ -139,7 +137,6 @@ class ChannelDigestScheduler:
                     intervention_threshold=self.intervention_threshold,
                     llm_call=self.llm_call,
                     bot_user_id=self.bot_user_id,
-                    mention_tracker=self.mention_tracker,
                 )
             )
         except Exception as e:

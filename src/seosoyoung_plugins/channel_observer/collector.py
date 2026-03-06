@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
+from seosoyoung.plugin_sdk import mention
 from seosoyoung_plugins.channel_observer.store import ChannelStore
-
-if TYPE_CHECKING:
-    from seosoyoung.slackbot.handlers.mention_tracker import MentionTracker
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +31,10 @@ class ChannelMessageCollector:
         self,
         store: ChannelStore,
         target_channels: list[str],
-        mention_tracker: MentionTracker | None = None,
         bot_user_id: str | None = None,
     ):
         self.store = store
         self.target_channels = set(target_channels)
-        self.mention_tracker = mention_tracker
         self._bot_user_id = bot_user_id
 
     @property
@@ -48,12 +43,12 @@ class ChannelMessageCollector:
         return self._bot_user_id
 
     def _detect_and_mark_mention(self, text: str, ts: str, thread_ts: str | None) -> bool:
-        """메시지 텍스트에 봇 멘션이 포함되어 있으면 mention_tracker에 마킹.
+        """메시지 텍스트에 봇 멘션이 포함되어 있으면 mention tracking API로 마킹.
 
         Returns:
             True: 봇 멘션이 포함된 메시지 (멘션 스레드), False: 일반 메시지
         """
-        if not self.mention_tracker:
+        if mention.get_backend() is None:
             return False
 
         bot_id = self.bot_user_id
@@ -66,10 +61,10 @@ class ChannelMessageCollector:
 
         # 봇 멘션이 포함된 메시지: 해당 스레드를 마킹
         if thread_ts:
-            self.mention_tracker.mark(thread_ts)
+            mention.mark(thread_ts)
         else:
             # 채널 루트 메시지에서 멘션: ts 자체가 스레드 루트가 됨
-            self.mention_tracker.mark(ts)
+            mention.mark(ts)
 
         return True
 
