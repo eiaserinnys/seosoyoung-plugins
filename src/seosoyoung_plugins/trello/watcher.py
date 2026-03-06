@@ -752,7 +752,12 @@ class TrelloWatcher:
         return ids
 
     def _check_run_list_labels(self):
-        """🏃 Run List 레이블을 가진 카드 감지 및 리스트 정주행 시작"""
+        """🏃 Run List 레이블을 가진 카드 감지 및 리스트 정주행 시작
+
+        레이블 제거는 _start_list_run() 내부에서 세션 생성 후 수행합니다.
+        이렇게 하면 세션 시작 실패 시 레이블이 유지되어
+        다음 폴링 사이클에서 재감지할 수 있습니다.
+        """
         lists = self.trello.get_lists()
         operational_ids = self._get_operational_list_ids()
 
@@ -781,18 +786,7 @@ class TrelloWatcher:
                         logger.warning(f"이미 활성 정주행 세션이 있어 스킵: {list_name}")
                         continue
 
-                label_id = self._get_run_list_label_id(first_card)
-                if label_id:
-                    if self.trello.remove_label_from_card(first_card.id, label_id):
-                        logger.info(f"🏃 Run List 레이블 제거: {first_card.name}")
-                    else:
-                        logger.warning(f"레이블 제거 실패, 정주행 스킵: {first_card.name}")
-                        continue
-                else:
-                    logger.warning(f"레이블 ID를 찾을 수 없음: {first_card.name}")
-                    continue
-
-                self._start_list_run(list_id, list_name, cards)
+                self._start_list_run(list_id, list_name, cards, first_card)
 
     COMPACT_TIMEOUT_SECONDS = 60
 
@@ -828,8 +822,27 @@ class TrelloWatcher:
         except Exception as e:
             logger.warning(f"선제적 컴팩트 예외: card={card_name}, {e}")
 
-    def _start_list_run(self, list_id: str, list_name: str, cards: list[TrelloCard]):
-        """리스트 정주행 시작"""
+    def _start_list_run(
+        self,
+        list_id: str,
+        list_name: str,
+        cards: list[TrelloCard],
+        trigger_card: Optional[TrelloCard] = None,
+    ):
+        """리스트 정주행 시작
+
+        세션을 RUNNING 상태로 즉시 생성한 후, 트리거 카드에서
+        🏃 Run List 레이블을 제거합니다. 이 순서를 통해:
+        1. 세션 생성 실패 시 레이블이 유지되어 다음 폴링에서 재감지
+        2. 세션이 RUNNING으로 즉시 등록되어 get_active_sessions()에 반영
+
+        Args:
+            list_id: 트렐로 리스트 ID
+            list_name: 리스트 이름
+            cards: 리스트 내 전체 카드 목록
+            trigger_card: 🏃 Run List 레이블이 붙어있는 카드.
+                None이면 레이블 제거를 건너뜁니다.
+        """
         logger.info(f"리스트 정주행 시작: {list_name} ({len(cards)}개 카드)")
 
         list_runner = self.list_runner_ref() if self.list_runner_ref else None
@@ -841,6 +854,17 @@ class TrelloWatcher:
         session = list_runner.create_session(
             list_id=list_id, list_name=list_name, card_ids=card_ids,
         )
+
+        # 세션 생성 성공 후 레이블 제거 (실패해도 정주행은 계속 진행)
+        if trigger_card:
+            label_id = self._get_run_list_label_id(trigger_card)
+            if label_id:
+                if self.trello.remove_label_from_card(trigger_card.id, label_id):
+                    logger.info(f"🏃 Run List 레이블 제거: {trigger_card.name}")
+                else:
+                    logger.warning(
+                        f"레이블 제거 실패 (정주행은 계속 진행): {trigger_card.name}"
+                    )
 
         dm_channel_id, dm_thread_ts = self._open_dm_thread(f"📋 {list_name} 정주행", "")
 

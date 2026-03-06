@@ -545,8 +545,13 @@ class TestCheckRunListLabelsFiltering:
         assert "list_review" not in call_args
         assert "list_togo" not in call_args
 
-    def test_label_removal_failure_skips_list_run(self, tmp_path):
-        """레이블 제거 실패 시 정주행을 시작하지 않아야 함"""
+    def test_label_removal_happens_inside_start_list_run(self, tmp_path):
+        """레이블 제거는 _start_list_run 내부에서 수행됨
+
+        _check_run_list_labels는 _start_list_run에 trigger_card를 전달하고,
+        _start_list_run이 세션 생성 후 레이블을 제거합니다.
+        _check_run_list_labels 자체는 remove_label_from_card를 호출하지 않습니다.
+        """
         from seosoyoung_plugins.trello.client import TrelloCard
 
         mock_trello = MagicMock()
@@ -568,13 +573,15 @@ class TestCheckRunListLabelsFiltering:
             {"id": "list_plan", "name": "📌 PLAN: Test"},
         ]
         mock_trello.get_cards_in_list.return_value = [card]
-        # 레이블 제거 실패
-        mock_trello.remove_label_from_card.return_value = False
 
         with patch.object(watcher, "_start_list_run") as mock_start:
             watcher._check_run_list_labels()
-            # _start_list_run이 호출되지 않아야 함
-            mock_start.assert_not_called()
+            # _start_list_run이 trigger_card와 함께 호출되어야 함
+            mock_start.assert_called_once()
+            trigger_card = mock_start.call_args[0][3]
+            assert trigger_card.id == "card_plan"
+            # _check_run_list_labels 자체는 레이블을 제거하지 않음
+            mock_trello.remove_label_from_card.assert_not_called()
 
     def test_active_session_guard_prevents_duplicate(self, tmp_path):
         """동일 리스트에 활성 세션이 있으면 정주행 시작 안 함"""
