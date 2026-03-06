@@ -553,14 +553,13 @@ class TrelloWatcher:
                 self._handle_new_card(card, list_key)
 
     def _handle_new_card(self, card: TrelloCard, list_key: str):
-        """새 카드 처리: In Progress 이동 → 알림 → 🌀 추가 → Claude 실행"""
-        in_progress_list_id = self._list_ids.get("in_progress")
-        if in_progress_list_id:
-            if self.trello.move_card(card.id, in_progress_list_id):
-                logger.info(f"카드 In Progress로 이동: {card.name}")
-            else:
-                logger.warning(f"카드 In Progress 이동 실패: {card.name}")
+        """새 카드 처리: 추적 등록 → 알림 → 🌀 추가 → Claude 실행 (이동은 실행 직전)
 
+        카드를 In Progress로 이동하는 것은 Claude 세션이 실제로
+        시작되는 시점까지 지연한다. 워커가 꽉 차 있는 등의 이유로
+        세션 할당이 실패하면 카드만 옮겨놓고 아무 일도 안 일어나는
+        상태를 방지한다.
+        """
         has_execute = self._has_execute_label(card)
         dm_channel_id, dm_thread_ts = self._open_dm_thread(card.name, card.url)
 
@@ -623,6 +622,15 @@ class TrelloWatcher:
         card_id_for_cleanup = card.id
         card_name_with_spinner = f"🌀 {card.name}"
         original_list_id = card.list_id
+        in_progress_list_id = self._list_ids.get("in_progress")
+
+        def on_start():
+            # Claude 세션이 시작되는 시점에 카드를 In Progress로 이동
+            if in_progress_list_id:
+                if self.trello.move_card(card_id_for_cleanup, in_progress_list_id):
+                    logger.info(f"카드 In Progress로 이동: {card.name}")
+                else:
+                    logger.warning(f"카드 In Progress 이동 실패: {card.name}")
 
         def on_error(e):
             # Claude 실행 실패 시 카드를 원래 리스트로 롤백
@@ -645,7 +653,7 @@ class TrelloWatcher:
             prompt=prompt, thread_ts=thread_ts,
             channel=msg_channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
-            on_error=on_error, on_finally=on_finally,
+            on_start=on_start, on_error=on_error, on_finally=on_finally,
         )
 
     def build_reaction_execute_prompt(self, info: ThreadCardInfo) -> str:
@@ -661,17 +669,30 @@ class TrelloWatcher:
         tracked: TrackedCard,
         dm_channel_id: Optional[str] = None,
         dm_thread_ts: Optional[str] = None,
+        on_start: Optional[Callable] = None,
         on_success: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
         on_finally: Optional[Callable] = None,
     ):
-        """Claude 실행 스레드 스포닝 (plugin_sdk 사용)"""
+        """Claude 실행 스레드 스포닝 (plugin_sdk 사용)
+
+        Args:
+            on_start: soulstream.run() 직전에 호출되는 콜백.
+                      카드 이동 등 실행 확정 시점에 수행할 작업에 사용.
+        """
 
         def run_claude():
             claude_succeeded = False
             try:
                 # Get existing session_id if available
                 session_id = soulstream.get_session_id(thread_ts)
+
+                # on_start: 실행 직전 콜백 (카드 이동 등)
+                if on_start:
+                    try:
+                        on_start()
+                    except Exception as e:
+                        logger.exception(f"on_start 콜백 오류: {e}")
 
                 # Run Claude using plugin_sdk
                 result = self._loop.run_until_complete(

@@ -2177,5 +2177,254 @@ class TestHandleNewCardRollback:
         assert rollback_call[0] == ("card_exception", "list_togo")
 
 
+class TestDeferredCardMove:
+    """버그 1: 카드 이동이 Claude 실행 직전까지 지연되는지 검증"""
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_card_not_moved_before_spawn(self, tmp_path, mock_plugin_sdk):
+        """_handle_new_card가 _spawn_claude_thread 전에 move_card를 호출하지 않음
+
+        on_start 콜백이 soulstream.run() 직전에만 카드를 이동해야 한다.
+        _handle_new_card 본문에서 직접 move_card를 호출하면 안 된다.
+        """
+        from seosoyoung_plugins.trello.client import TrelloCard
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        move_call_order = []
+
+        mock_trello = MagicMock()
+        mock_trello.update_card_name.return_value = True
+
+        def track_move_card(card_id, list_id):
+            move_call_order.append(("move_card", card_id, list_id))
+            return True
+        mock_trello.move_card.side_effect = track_move_card
+
+        original_run = mock_plugin_sdk["soulstream"].run
+
+        async def tracking_run(*args, **kwargs):
+            move_call_order.append(("soulstream.run",))
+            return RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s1")
+        mock_plugin_sdk["soulstream"].run = AsyncMock(side_effect=tracking_run)
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_inprogress"}},
+        )
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_deferred",
+            name="Deferred Move Card",
+            desc="",
+            url="https://trello.com/c/deferred",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        # move_card(In Progress)가 soulstream.run() 직전에 호출되었는지 확인
+        # 순서: ("move_card", ..., "list_inprogress") → ("soulstream.run",)
+        move_indices = [
+            i for i, entry in enumerate(move_call_order)
+            if entry[0] == "move_card" and entry[2] == "list_inprogress"
+        ]
+        run_indices = [
+            i for i, entry in enumerate(move_call_order)
+            if entry[0] == "soulstream.run"
+        ]
+
+        assert len(move_indices) == 1, f"In Progress 이동이 정확히 1회여야 함, 실제: {move_indices}"
+        assert len(run_indices) == 1, f"soulstream.run이 정확히 1회여야 함, 실제: {run_indices}"
+        assert move_indices[0] < run_indices[0], (
+            f"move_card가 soulstream.run 전에 호출되어야 함: "
+            f"move={move_indices[0]}, run={run_indices[0]}"
+        )
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_card_tracked_before_spawn(self, tmp_path, mock_plugin_sdk):
+        """카드가 _tracked에 등록된 후에 _spawn_claude_thread가 호출됨
+
+        다음 폴링에서 같은 카드가 중복 처리되지 않도록,
+        _tracked 등록은 _spawn_claude_thread 이전에 완료되어야 한다.
+        """
+        from seosoyoung_plugins.trello.client import TrelloCard
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        tracked_at_run_time = {}
+
+        async def check_tracked_run(*args, **kwargs):
+            tracked_at_run_time["snapshot"] = dict(watcher._tracked)
+            return RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s2")
+        mock_plugin_sdk["soulstream"].run = AsyncMock(side_effect=check_tracked_run)
+
+        mock_trello = MagicMock()
+        mock_trello.move_card.return_value = True
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": "list_inprogress"}},
+        )
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_tracked_order",
+            name="Track Order Card",
+            desc="",
+            url="https://trello.com/c/trackorder",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        # soulstream.run 호출 시점에 카드가 이미 _tracked에 있어야 함
+        assert "card_tracked_order" in tracked_at_run_time["snapshot"]
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_no_move_when_in_progress_list_not_configured(self, tmp_path, mock_plugin_sdk):
+        """in_progress 리스트가 설정되지 않으면 move_card가 호출되지 않음"""
+        from seosoyoung_plugins.trello.client import TrelloCard
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            return_value=RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s3")
+        )
+
+        mock_trello = MagicMock()
+        mock_trello.update_card_name.return_value = True
+
+        watcher = _make_watcher(
+            tmp_path,
+            trello_client=mock_trello,
+            config={"list_ids": {"in_progress": None}},
+        )
+        watcher._loop = asyncio.new_event_loop()
+
+        card = TrelloCard(
+            id="card_no_move",
+            name="No Move Card",
+            desc="",
+            url="https://trello.com/c/nomove",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        try:
+            watcher._handle_new_card(card, "to_go")
+        finally:
+            watcher._loop.close()
+
+        mock_trello.move_card.assert_not_called()
+
+
+class TestOnStartCallback:
+    """_spawn_claude_thread의 on_start 콜백 테스트"""
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_on_start_called_before_soulstream_run(self, tmp_path, mock_plugin_sdk):
+        """on_start가 soulstream.run() 직전에 호출됨"""
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        call_order = []
+
+        def on_start():
+            call_order.append("on_start")
+
+        async def tracking_run(*args, **kwargs):
+            call_order.append("soulstream.run")
+            return RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s")
+        mock_plugin_sdk["soulstream"].run = AsyncMock(side_effect=tracking_run)
+
+        watcher = _make_watcher(tmp_path)
+        watcher._loop = asyncio.new_event_loop()
+
+        tracked = TrackedCard(
+            card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
+            list_id="l1", list_key="to_go", thread_ts="1234.5678",
+            channel_id="C123", detected_at="2026-01-01T00:00:00",
+        )
+
+        try:
+            watcher._spawn_claude_thread(
+                prompt="test", thread_ts="1234.5678", channel="C123",
+                tracked=tracked, on_start=on_start,
+            )
+        finally:
+            watcher._loop.close()
+
+        assert call_order == ["on_start", "soulstream.run"]
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_on_start_exception_does_not_block_run(self, tmp_path, mock_plugin_sdk):
+        """on_start에서 예외가 발생해도 soulstream.run()은 실행됨"""
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            return_value=RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s")
+        )
+
+        def on_start():
+            raise RuntimeError("on_start error")
+
+        watcher = _make_watcher(tmp_path)
+        watcher._loop = asyncio.new_event_loop()
+
+        tracked = TrackedCard(
+            card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
+            list_id="l1", list_key="to_go", thread_ts="1234.5678",
+            channel_id="C123", detected_at="2026-01-01T00:00:00",
+        )
+
+        try:
+            watcher._spawn_claude_thread(
+                prompt="test", thread_ts="1234.5678", channel="C123",
+                tracked=tracked, on_start=on_start,
+            )
+        finally:
+            watcher._loop.close()
+
+        # on_start 실패에도 불구하고 soulstream.run이 호출되어야 함
+        mock_plugin_sdk["soulstream"].run.assert_called_once()
+
+    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    def test_no_on_start_is_fine(self, tmp_path, mock_plugin_sdk):
+        """on_start가 None이면 건너뛰고 정상 실행"""
+        from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+
+        mock_plugin_sdk["soulstream"].run = AsyncMock(
+            return_value=RunResult(ok=True, status=RunStatus.COMPLETED, session_id="s")
+        )
+
+        watcher = _make_watcher(tmp_path)
+        watcher._loop = asyncio.new_event_loop()
+
+        tracked = TrackedCard(
+            card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
+            list_id="l1", list_key="to_go", thread_ts="1234.5678",
+            channel_id="C123", detected_at="2026-01-01T00:00:00",
+        )
+
+        try:
+            watcher._spawn_claude_thread(
+                prompt="test", thread_ts="1234.5678", channel="C123",
+                tracked=tracked,
+            )
+        finally:
+            watcher._loop.close()
+
+        mock_plugin_sdk["soulstream"].run.assert_called_once()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
