@@ -56,6 +56,11 @@ class TrelloWatcher:
 
     모든 설정은 생성자에서 직접 전달받습니다.
     Config 싱글턴에 의존하지 않습니다.
+
+    동시 처리 설계:
+    - _state_lock: _tracked, _thread_cards 등 공유 상태 접근 보호
+    - _card_executor: 새 카드 처리를 병렬화하는 ThreadPoolExecutor
+    - adaptive polling: 새 카드 감지 시 burst 모드로 짧은 간격 재폴링
     """
 
     def __init__(
@@ -73,6 +78,10 @@ class TrelloWatcher:
             trello_client: TrelloClient 인스턴스
             prompt_builder: PromptBuilder 인스턴스
             config: 플러그인 설정 dict (YAML에서 로드)
+                필수 키: notify_channel, poll_interval, watch_lists,
+                         dm_target_user_id, polling_debug, list_ids
+                선택 키: burst_interval (기본 3), max_burst_count (기본 5),
+                         max_card_workers (기본 3)
             get_session_lock: 스레드별 락 반환 함수
             data_dir: 상태 파일 저장 디렉토리
             list_runner_ref: ListRunner 참조 함수
@@ -90,6 +99,13 @@ class TrelloWatcher:
         self.dm_target_user_id = config["dm_target_user_id"]
         self.polling_debug = config["polling_debug"]
 
+        # Adaptive polling 설정 (선택적 — 없으면 기본값 사용)
+        self.burst_interval = config.get("burst_interval", 3)
+        self.max_burst_count = config.get("max_burst_count", 5)
+
+        # 카드 병렬 처리 설정
+        self._max_card_workers = config.get("max_card_workers", 3)
+
         # 리스트 IDs
         self._list_ids = config["list_ids"]
 
@@ -98,6 +114,9 @@ class TrelloWatcher:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.tracked_file = self.data_dir / "tracked_cards.json"
         self.thread_cards_file = self.data_dir / "thread_cards.json"
+
+        # 공유 상태 보호 락
+        self._state_lock = threading.Lock()
 
         # 추적 중인 카드
         self._tracked: dict[str, TrackedCard] = {}
@@ -117,7 +136,10 @@ class TrelloWatcher:
         # 리스트 정주행 직렬화 락
         self._list_run_lock = threading.Lock()
 
-    # -- 상태 관리 메서드 (변경 없음) --
+        # 카드 처리용 ThreadPoolExecutor
+        self._card_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+    # -- 상태 관리 메서드 --
 
     def _load_tracked(self):
         """추적 상태 로드"""
@@ -189,18 +211,20 @@ class TrelloWatcher:
 
     def _untrack_card(self, card_id: str):
         """카드 추적 해제"""
-        if card_id in self._tracked:
-            tracked = self._tracked.pop(card_id)
-            self._save_tracked()
-            logger.info(f"카드 추적 해제: {tracked.card_name}")
+        with self._state_lock:
+            if card_id in self._tracked:
+                tracked = self._tracked.pop(card_id)
+                self._save_tracked()
+                logger.info(f"카드 추적 해제: {tracked.card_name}")
 
     def update_thread_card_session_id(self, thread_ts: str, session_id: str) -> bool:
         """ThreadCardInfo의 session_id 업데이트"""
-        if thread_ts in self._thread_cards:
-            self._thread_cards[thread_ts].session_id = session_id
-            self._save_thread_cards()
-            return True
-        return False
+        with self._state_lock:
+            if thread_ts in self._thread_cards:
+                self._thread_cards[thread_ts].session_id = session_id
+                self._save_thread_cards()
+                return True
+            return False
 
     def get_tracked_by_thread_ts(self, thread_ts: str) -> Optional[ThreadCardInfo]:
         """thread_ts로 ThreadCardInfo 조회"""
@@ -208,11 +232,12 @@ class TrelloWatcher:
 
     def update_tracked_session_id(self, card_id: str, session_id: str) -> bool:
         """TrackedCard의 session_id 업데이트"""
-        if card_id in self._tracked:
-            self._tracked[card_id].session_id = session_id
-            self._save_tracked()
-            return True
-        return False
+        with self._state_lock:
+            if card_id in self._tracked:
+                self._tracked[card_id].session_id = session_id
+                self._save_tracked()
+                return True
+            return False
 
     # -- 워처 라이프사이클 --
 
@@ -227,13 +252,23 @@ class TrelloWatcher:
             return
 
         self._stop_event.clear()
+        self._card_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self._max_card_workers,
+            thread_name_prefix="watcher-card",
+        )
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger.info(f"Trello 워처 시작: {self.poll_interval}초 간격")
+        logger.info(
+            f"Trello 워처 시작: {self.poll_interval}초 간격 "
+            f"(burst: {self.burst_interval}초, 최대 {self.max_burst_count}회)"
+        )
 
     def stop(self):
         """워처 중지"""
         self._stop_event.set()
+        if self._card_executor:
+            self._card_executor.shutdown(wait=False)
+            self._card_executor = None
         if self._thread:
             self._thread.join(timeout=5)
             logger.info("Trello 워처 중지")
@@ -256,26 +291,58 @@ class TrelloWatcher:
             return self._paused
 
     def _run(self):
-        """워처 메인 루프"""
-        # Create event loop for this thread
+        """워처 메인 루프 (adaptive polling)
+
+        기본적으로 poll_interval 간격으로 폴링하되,
+        새 카드가 감지되면 burst_interval 간격으로 최대 max_burst_count회 재폴링한다.
+        연속으로 새 카드가 없으면 기존 간격으로 복귀한다.
+        """
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
+        burst_remaining = 0
+
         try:
             while not self._stop_event.is_set():
+                found_new = False
                 try:
-                    self._poll()
+                    found_new = self._poll()
                 except Exception as e:
                     logger.exception(f"워처 폴링 오류: {e}")
-                self._stop_event.wait(timeout=self.poll_interval)
+
+                if found_new and burst_remaining == 0:
+                    burst_remaining = self.max_burst_count
+                    logger.debug(
+                        f"Burst 모드 진입: {self.burst_interval}초 간격, "
+                        f"최대 {burst_remaining}회"
+                    )
+
+                if burst_remaining > 0:
+                    if not found_new:
+                        burst_remaining = 0
+                        logger.debug("Burst 모드 종료: 새 카드 없음")
+                        wait_time = self.poll_interval
+                    else:
+                        burst_remaining -= 1
+                        wait_time = self.burst_interval
+                        if burst_remaining == 0:
+                            logger.debug("Burst 모드 종료: 최대 횟수 도달")
+                else:
+                    wait_time = self.poll_interval
+
+                self._stop_event.wait(timeout=wait_time)
         finally:
             self._loop.close()
 
-    def _poll(self):
-        """리스트 폴링"""
+    def _poll(self) -> bool:
+        """리스트 폴링
+
+        Returns:
+            새 카드가 감지되었으면 True, 아니면 False
+        """
         if self.is_paused:
             logger.debug("Trello 워처 일시 중단 상태 - 폴링 스킵")
-            return
+            return False
 
         if self.polling_debug:
             logger.debug("Trello 폴링 시작")
@@ -288,13 +355,20 @@ class TrelloWatcher:
 
         self._cleanup_stale_tracked(current_cards)
 
-        for card_id, (card, list_key) in current_cards.items():
-            if card_id not in self._tracked:
-                logger.info(f"새 카드 감지: [{list_key}] {card.name}")
-                self._handle_new_card(card, list_key)
+        new_cards: list[tuple[TrelloCard, str]] = []
+        with self._state_lock:
+            for card_id, (card, list_key) in current_cards.items():
+                if card_id not in self._tracked:
+                    logger.info(f"새 카드 감지: [{list_key}] {card.name}")
+                    new_cards.append((card, list_key))
+
+        if new_cards:
+            self._handle_new_cards(new_cards)
 
         self._check_review_list_for_completion()
         self._check_run_list_labels()
+
+        return len(new_cards) > 0
 
     STALE_THRESHOLD = timedelta(hours=2)
 
@@ -302,22 +376,26 @@ class TrelloWatcher:
         """만료된 _tracked 항목 정리"""
         now = datetime.now()
         stale_ids = []
-        for card_id, tracked in self._tracked.items():
-            try:
-                detected = datetime.fromisoformat(tracked.detected_at)
-            except (ValueError, TypeError):
-                detected = now
-            if now - detected >= self.STALE_THRESHOLD:
-                stale_ids.append(card_id)
+        with self._state_lock:
+            for card_id, tracked in self._tracked.items():
+                try:
+                    detected = datetime.fromisoformat(tracked.detected_at)
+                except (ValueError, TypeError):
+                    detected = now
+                if now - detected >= self.STALE_THRESHOLD:
+                    stale_ids.append(card_id)
 
         for card_id in stale_ids:
-            in_watch_list = card_id in current_cards
-            tracked = self._tracked[card_id]
-            logger.info(
-                f"stale 카드 정리: {tracked.card_name} "
-                f"(감시 리스트 {'내' if in_watch_list else '외'}, "
-                f"경과: {now - datetime.fromisoformat(tracked.detected_at)})"
-            )
+            with self._state_lock:
+                if card_id not in self._tracked:
+                    continue
+                in_watch_list = card_id in current_cards
+                tracked = self._tracked[card_id]
+                logger.info(
+                    f"stale 카드 정리: {tracked.card_name} "
+                    f"(감시 리스트 {'내' if in_watch_list else '외'}, "
+                    f"경과: {now - datetime.fromisoformat(tracked.detected_at)})"
+                )
             self._untrack_card(card_id)
 
     def _check_review_list_for_completion(self):
@@ -429,12 +507,31 @@ class TrelloWatcher:
 
     # -- 카드 처리 --
 
-    def _handle_new_card(self, card: TrelloCard, list_key: str):
-        """새 카드 처리: In Progress 이동 → 알림 → 🌀 추가 → Claude 실행
+    def _handle_new_cards(self, new_cards: list[tuple[TrelloCard, str]]):
+        """새 카드들을 병렬로 처리
 
-        NOTE: 이 메서드는 seosoyoung 패키지에 대한 의존성이 있습니다.
-        Phase 5에서 수정될 예정입니다.
+        _card_executor가 있으면 ThreadPoolExecutor로 병렬 실행,
+        없으면 (테스트 등) 순차 실행한다.
         """
+        if self._card_executor and len(new_cards) > 1:
+            futures = []
+            for card, list_key in new_cards:
+                future = self._card_executor.submit(
+                    self._handle_new_card, card, list_key
+                )
+                futures.append(future)
+
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.exception(f"카드 병렬 처리 오류: {e}")
+        else:
+            for card, list_key in new_cards:
+                self._handle_new_card(card, list_key)
+
+    def _handle_new_card(self, card: TrelloCard, list_key: str):
+        """새 카드 처리: In Progress 이동 → 알림 → 🌀 추가 → Claude 실행"""
         in_progress_list_id = self._list_ids.get("in_progress")
         if in_progress_list_id:
             if self.trello.move_card(card.id, in_progress_list_id):
@@ -493,8 +590,11 @@ class TrelloWatcher:
             detected_at=datetime.now().isoformat(), has_execute=has_execute,
         )
         tracked.dm_thread_ts = dm_thread_ts
-        self._tracked[card.id] = tracked
-        self._save_tracked()
+
+        with self._state_lock:
+            self._tracked[card.id] = tracked
+            self._save_tracked()
+
         self._register_thread_card(tracked)
 
         prompt = self.prompt_builder.build_to_go(card, has_execute)
@@ -755,11 +855,7 @@ class TrelloWatcher:
         self, list_runner, session_id: str, thread_ts: str,
         channel: str, run_channel: str = None,
     ):
-        """리스트 정주행 카드 처리 내부 로직
-
-        NOTE: 이 메서드는 seosoyoung 패키지에 대한 의존성이 있습니다.
-        Phase 5에서 수정될 예정입니다.
-        """
+        """리스트 정주행 카드 처리 내부 로직"""
         from seosoyoung_plugins.trello.list_runner import SessionStatus
 
         session = list_runner.get_session(session_id)
@@ -782,13 +878,18 @@ class TrelloWatcher:
 
         list_runner.update_session_status(session_id, SessionStatus.RUNNING)
 
-        if next_card_id in self._tracked:
-            existing = self._tracked[next_card_id]
-            if existing.thread_ts != thread_ts:
-                logger.warning(f"카드가 다른 세션에서 이미 처리 중이므로 스킵: {next_card_id}")
-                list_runner.mark_card_processed(session_id, next_card_id, "skipped_duplicate")
-                self._process_list_run_card(session_id, thread_ts, run_channel)
-                return
+        skip_duplicate = False
+        with self._state_lock:
+            if next_card_id in self._tracked:
+                existing = self._tracked[next_card_id]
+                if existing.thread_ts != thread_ts:
+                    skip_duplicate = True
+
+        if skip_duplicate:
+            logger.warning(f"카드가 다른 세션에서 이미 처리 중이므로 스킵: {next_card_id}")
+            list_runner.mark_card_processed(session_id, next_card_id, "skipped_duplicate")
+            self._process_list_run_card(session_id, thread_ts, run_channel)
+            return
 
         card = self.trello.get_card(next_card_id)
         if not card:
@@ -827,8 +928,10 @@ class TrelloWatcher:
             thread_ts=thread_ts, channel_id=channel,
             detected_at=datetime.now().isoformat(), has_execute=True,
         )
-        self._tracked[card.id] = tracked
-        self._save_tracked()
+
+        with self._state_lock:
+            self._tracked[card.id] = tracked
+            self._save_tracked()
 
         def on_success():
             list_runner.mark_card_processed(session_id, card.id, "completed")
