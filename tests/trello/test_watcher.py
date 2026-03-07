@@ -1609,7 +1609,7 @@ class TestParallelCardHandling:
     """_handle_new_cards 병렬 처리 테스트"""
 
     def test_single_card_handled_directly(self, tmp_path, mock_plugin_sdk):
-        """카드가 1개면 executor 없이 직접 처리"""
+        """executor가 없으면 카드 1개도 직접 처리"""
         from seosoyoung_plugins.trello.client import TrelloCard
 
         mock_trello = MagicMock()
@@ -1634,6 +1634,42 @@ class TestParallelCardHandling:
         with patch.object(watcher, "_handle_new_card") as mock_handle:
             watcher._handle_new_cards([(card, "to_go")])
             mock_handle.assert_called_once_with(card, "to_go")
+
+    def test_single_card_with_executor_uses_executor(self, tmp_path, mock_plugin_sdk):
+        """executor가 있으면 카드 1개도 executor로 처리"""
+        import concurrent.futures
+        from seosoyoung_plugins.trello.client import TrelloCard
+
+        watcher = _make_watcher(
+            tmp_path,
+            config={"list_ids": {"in_progress": "list_ip"}},
+        )
+        watcher._card_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="test-card"
+        )
+
+        card = TrelloCard(
+            id="single_card",
+            name="Single Card",
+            desc="",
+            url="https://trello.com/c/single",
+            list_id="list_togo",
+            labels=[],
+        )
+
+        handled = []
+
+        def tracking_handle(c, list_key):
+            handled.append(c.id)
+
+        watcher._handle_new_card = tracking_handle
+
+        try:
+            watcher._handle_new_cards([(card, "to_go")])
+        finally:
+            watcher._card_executor.shutdown(wait=True)
+
+        assert handled == ["single_card"]
 
     def test_multiple_cards_all_handled(self, tmp_path, mock_plugin_sdk):
         """여러 카드가 모두 처리됨"""
