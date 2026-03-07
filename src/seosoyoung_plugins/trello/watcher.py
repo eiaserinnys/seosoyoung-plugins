@@ -535,7 +535,7 @@ class TrelloWatcher:
         _card_executor가 있으면 ThreadPoolExecutor로 병렬 실행,
         없으면 (테스트 등) 순차 실행한다.
         """
-        if self._card_executor and len(new_cards) > 1:
+        if self._card_executor and len(new_cards) >= 1:
             futures = []
             for card, list_key in new_cards:
                 future = self._card_executor.submit(
