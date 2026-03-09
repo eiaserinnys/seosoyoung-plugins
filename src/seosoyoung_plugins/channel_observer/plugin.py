@@ -62,6 +62,9 @@ class ChannelObserverPlugin(Plugin):
         self._intervention_threshold: float = config.get(
             "intervention_threshold", 0.18
         )
+        self._recent_messages_count: int = config.get(
+            "recent_messages_count", 5
+        )
         self._periodic_sec: int = config.get("periodic_sec", 300)
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
@@ -158,6 +161,7 @@ class ChannelObserverPlugin(Plugin):
                 intervention_threshold=self._intervention_threshold,
                 llm_call=self._llm_call,
                 bot_user_id=self._bot_user_id,
+                recent_messages_count=self._recent_messages_count,
             )
             self._scheduler.start()
 
@@ -328,6 +332,7 @@ class ChannelObserverPlugin(Plugin):
                             intervention_threshold=self._intervention_threshold,
                             llm_call=self._llm_call,
                             bot_user_id=self._bot_user_id,
+                            recent_messages_count=self._recent_messages_count,
                         )
                     )
                 finally:
