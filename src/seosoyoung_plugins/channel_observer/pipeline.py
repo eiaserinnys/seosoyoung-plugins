@@ -278,6 +278,7 @@ async def run_channel_pipeline(
     intervention_threshold: float = 0.3,
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
+    recent_messages_count: int = 5,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -447,7 +448,7 @@ async def run_channel_pipeline(
                 judge_result=judge_result,
                 store=store,
                 channel_id=channel_id,
-                
+
                 cooldown=cooldown,
                 pending_messages=judge_pending,
                 current_digest=current_digest,
@@ -459,6 +460,7 @@ async def run_channel_pipeline(
                 thread_buffers=judge_thread_buffers,
                 mention_handled_ts=mention_handled_ts,
                 dispatch=kwargs.get("dispatch"),
+                recent_messages_count=recent_messages_count,
             )
         else:
             # 하위호환: 단일 판단 경로
@@ -466,7 +468,7 @@ async def run_channel_pipeline(
                 judge_result=judge_result,
                 store=store,
                 channel_id=channel_id,
-                
+
                 cooldown=cooldown,
                 pending_messages=judge_pending,
                 current_digest=current_digest,
@@ -478,6 +480,7 @@ async def run_channel_pipeline(
                 thread_buffers=judge_thread_buffers,
                 mention_handled_ts=mention_handled_ts,
                 dispatch=kwargs.get("dispatch"),
+                recent_messages_count=recent_messages_count,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
@@ -498,6 +501,7 @@ async def _handle_multi_judge(
     session_manager=None,
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
+    recent_messages_count: int = 5,
     **kwargs,
 ) -> None:
     """복수 JudgeItem 처리: 이모지 일괄 + 개입 확률 판단"""
@@ -584,6 +588,7 @@ async def _handle_multi_judge(
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
                             session_manager=session_manager,
+                            recent_messages_count=recent_messages_count,
                         )
                     else:
                         await execute_interventions(channel_id, [action])
@@ -617,6 +622,7 @@ async def _handle_single_judge(
     session_manager=None,
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
+    recent_messages_count: int = 5,
     **kwargs,
 ) -> None:
     """하위호환: 단일 JudgeResult 처리"""
@@ -712,6 +718,7 @@ async def _handle_single_judge(
                             thread_buffers=thread_buffers,
                             dispatch=kwargs.get("dispatch"),
                             session_manager=session_manager,
+                            recent_messages_count=recent_messages_count,
                         )
                 else:
                     await execute_interventions(channel_id, message_actions)
@@ -743,6 +750,7 @@ async def _execute_intervene(
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
     thread_buffers: dict[str, list[dict]] | None = None,
+    recent_messages_count: int = 5,
     **kwargs,
 ) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
@@ -770,7 +778,7 @@ async def _execute_intervene(
         for i, msg in enumerate(pending_messages):
             if msg.get("ts") == target_ts:
                 trigger_message = msg
-                start = max(0, i - 5)
+                start = max(0, i - recent_messages_count)
                 recent_messages = pending_messages[start:i]
                 break
 
@@ -780,7 +788,7 @@ async def _execute_intervene(
                 for msg in thread_msgs:
                     if msg.get("ts") == target_ts:
                         trigger_message = msg
-                        recent_messages = pending_messages[-5:]
+                        recent_messages = pending_messages[-recent_messages_count:]
                         break
                 if trigger_message is not None:
                     break
@@ -791,7 +799,7 @@ async def _execute_intervene(
             for msg in judged_messages:
                 if msg.get("ts") == target_ts:
                     trigger_message = msg
-                    recent_messages = pending_messages[-5:]
+                    recent_messages = pending_messages[-recent_messages_count:]
                     break
 
         # Bug C: 어디에서도 못 찾으면 intervention 스킵 (엉뚱한 메시지 폴백 방지)
@@ -806,7 +814,7 @@ async def _execute_intervene(
     if trigger_message is None and pending_messages:
         # target이 "channel"인 경우에만 여기에 도달
         trigger_message = pending_messages[-1]
-        recent_messages = pending_messages[-6:-1]
+        recent_messages = pending_messages[-(recent_messages_count + 1):-1]
 
     # 3. 프롬프트 구성
     system_prompt = get_channel_intervene_system_prompt()

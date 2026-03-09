@@ -40,6 +40,7 @@ class ChannelDigestScheduler:
         intervention_threshold: float = 0.3,
         llm_call: Optional[Callable] = None,
         bot_user_id: str = "",
+        recent_messages_count: int = 5,
         **kwargs,
     ):
         self.store = store
@@ -55,6 +56,7 @@ class ChannelDigestScheduler:
         self.intervention_threshold = intervention_threshold
         self.llm_call = llm_call
         self.bot_user_id = bot_user_id
+        self.recent_messages_count = recent_messages_count
 
         self._timer: threading.Timer | None = None
         self._running = False
@@ -137,6 +139,7 @@ class ChannelDigestScheduler:
                     intervention_threshold=self.intervention_threshold,
                     llm_call=self.llm_call,
                     bot_user_id=self.bot_user_id,
+                    recent_messages_count=self.recent_messages_count,
                 )
             )
         except Exception as e:
