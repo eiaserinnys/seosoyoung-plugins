@@ -1,15 +1,17 @@
 """Reflector 모듈
 
 관찰 로그가 임계치를 초과할 때 재구조화하고 압축합니다.
-OpenAI API를 사용하여 관찰 로그를 요약하고, JSON 형식으로 결과를 파싱합니다.
+소울스트림 LLM 프록시를 통해 API를 호출하고, JSON 형식으로 결과를 파싱합니다.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import openai
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 from seosoyoung_plugins.memory.prompts import (
     build_reflector_system_prompt,
@@ -93,8 +95,8 @@ def _assign_reflector_ids(raw_items: list) -> list[dict]:
 class Reflector:
     """관찰 로그를 압축하고 재구조화"""
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-4.1-mini"):
+        self.client = soulstream_client
         self.model = model
         self.token_counter = TokenCounter()
 
@@ -117,16 +119,18 @@ class Reflector:
 
         try:
             # 1차 시도
-            response = await self.client.chat.completions.create(
+            result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": obs_json},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="memory",
             )
 
-            result_text = response.choices[0].message.content or ""
+            result_text = result.content
             raw_items = _parse_reflector_output(result_text)
             compressed = _assign_reflector_ids(raw_items)
             token_count = self.token_counter.count_string(
@@ -146,7 +150,8 @@ class Reflector:
 
             # 2차 시도 (재시도)
             retry_prompt = build_reflector_retry_prompt(token_count, target_tokens)
-            response = await self.client.chat.completions.create(
+            retry_result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -154,10 +159,11 @@ class Reflector:
                     {"role": "assistant", "content": result_text},
                     {"role": "user", "content": retry_prompt},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="memory",
             )
 
-            retry_text = response.choices[0].message.content or ""
+            retry_text = retry_result.content
             raw_items = _parse_reflector_output(retry_text)
             compressed = _assign_reflector_ids(raw_items)
             token_count = self.token_counter.count_string(

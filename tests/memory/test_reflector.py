@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from seosoyoung_plugins.soulstream_client import SoulstreamClient, SoulstreamResult
 from seosoyoung_plugins.memory.reflector import Reflector, ReflectorResult, _parse_reflector_output
 
 
@@ -59,30 +60,25 @@ class TestParseReflectorOutput:
 
 class TestReflector:
     @pytest.fixture
-    def mock_openai_client(self):
-        client = AsyncMock()
-        return client
+    def mock_soulstream(self):
+        return AsyncMock(spec=SoulstreamClient)
 
     @pytest.mark.asyncio
-    async def test_reflect_success_under_target(self):
+    async def test_reflect_success_under_target(self, mock_soulstream):
         """1차 시도에서 목표 이하면 바로 반환"""
-        reflector = Reflector(api_key="test-key")
+        reflector = Reflector(soulstream_client=mock_soulstream)
 
         compressed = json.dumps([
             {"priority": "🔴", "content": "압축된 관찰", "session_date": "2026-02-10"}
         ])
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content=compressed))]
+        mock_soulstream.complete = AsyncMock(return_value=SoulstreamResult(
+            content=compressed, input_tokens=100, output_tokens=50, session_id="test",
+        ))
 
-        with patch.object(
-            reflector.client.chat.completions, "create",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ):
-            result = await reflector.reflect(
-                observations=_make_obs_items([("🟢", "관찰")] * 10),
-                target_tokens=50000,  # 매우 높은 목표
-            )
+        result = await reflector.reflect(
+            observations=_make_obs_items([("🟢", "관찰")] * 10),
+            target_tokens=50000,  # 매우 높은 목표
+        )
 
         assert result is not None
         assert len(result.observations) == 1
@@ -90,9 +86,9 @@ class TestReflector:
         assert result.token_count > 0
 
     @pytest.mark.asyncio
-    async def test_reflect_retry_when_over_target(self):
+    async def test_reflect_retry_when_over_target(self, mock_soulstream):
         """1차 시도에서 목표 초과 시 재시도"""
-        reflector = Reflector(api_key="test-key")
+        reflector = Reflector(soulstream_client=mock_soulstream)
 
         # 1차: 긴 결과
         first_items = [
@@ -105,64 +101,48 @@ class TestReflector:
         second_items = [{"priority": "🔴", "content": "압축된 관찰", "session_date": "2026-02-10"}]
         second_text = json.dumps(second_items)
 
-        first_response = MagicMock()
-        first_response.choices = [MagicMock(message=MagicMock(content=first_text))]
-
-        second_response = MagicMock()
-        second_response.choices = [MagicMock(message=MagicMock(content=second_text))]
-
         call_count = [0]
-        async def mock_create(**kwargs):
+        async def mock_complete(**kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
-                return first_response
-            return second_response
-
-        with patch.object(
-            reflector.client.chat.completions, "create",
-            side_effect=mock_create,
-        ):
-            result = await reflector.reflect(
-                observations=_make_obs_items([("🟢", "관찰")] * 10),
-                target_tokens=10,  # 매우 낮은 목표 → 재시도 유발
+            content = first_text if call_count[0] == 1 else second_text
+            return SoulstreamResult(
+                content=content, input_tokens=100, output_tokens=50, session_id="test",
             )
+
+        mock_soulstream.complete = AsyncMock(side_effect=mock_complete)
+
+        result = await reflector.reflect(
+            observations=_make_obs_items([("🟢", "관찰")] * 10),
+            target_tokens=10,  # 매우 낮은 목표 → 재시도 유발
+        )
 
         assert result is not None
         assert call_count[0] == 2  # 2번 호출
 
     @pytest.mark.asyncio
-    async def test_reflect_api_error_returns_none(self):
+    async def test_reflect_api_error_returns_none(self, mock_soulstream):
         """API 오류 시 None 반환"""
-        reflector = Reflector(api_key="test-key")
+        reflector = Reflector(soulstream_client=mock_soulstream)
+        mock_soulstream.complete = AsyncMock(side_effect=Exception("API 오류"))
 
-        with patch.object(
-            reflector.client.chat.completions, "create",
-            new_callable=AsyncMock,
-            side_effect=Exception("API 오류"),
-        ):
-            result = await reflector.reflect(
-                observations=_make_obs_items([("🟢", "관찰 로그")])
-            )
+        result = await reflector.reflect(
+            observations=_make_obs_items([("🟢", "관찰 로그")])
+        )
 
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_reflect_empty_response(self):
+    async def test_reflect_empty_response(self, mock_soulstream):
         """빈 응답 처리"""
-        reflector = Reflector(api_key="test-key")
+        reflector = Reflector(soulstream_client=mock_soulstream)
+        mock_soulstream.complete = AsyncMock(return_value=SoulstreamResult(
+            content="", input_tokens=100, output_tokens=0, session_id="test",
+        ))
 
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content=""))]
-
-        with patch.object(
-            reflector.client.chat.completions, "create",
-            new_callable=AsyncMock,
-            return_value=mock_response,
-        ):
-            result = await reflector.reflect(
-                observations=_make_obs_items([("🟢", "관찰 로그")]),
-                target_tokens=50000,
-            )
+        result = await reflector.reflect(
+            observations=_make_obs_items([("🟢", "관찰 로그")]),
+            target_tokens=50000,
+        )
 
         assert result is not None
         assert result.observations == []

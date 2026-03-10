@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from seosoyoung_plugins.soulstream_client import SoulstreamClient, SoulstreamResult
 from seosoyoung_plugins.memory.promoter import (
     Compactor,
     CompactorResult,
@@ -151,21 +152,20 @@ class TestPromoterMerge:
 
 
 class TestPromoterPromote:
+    @pytest.fixture
+    def mock_soulstream(self):
+        return AsyncMock(spec=SoulstreamClient)
+
     @pytest.mark.asyncio
-    async def test_promote_calls_api(self):
-        promoter = Promoter(api_key="test-key", model="test-model")
+    async def test_promote_calls_api(self, mock_soulstream):
+        promoter = Promoter(soulstream_client=mock_soulstream, model="test-model")
         response_data = {
             "promoted": [{"priority": "🔴", "content": "승격 항목"}],
             "rejected": [{"content": "기각"}],
         }
-        mock_response = MagicMock()
-        mock_response.choices = [
-            MagicMock(
-                message=MagicMock(content=json.dumps(response_data))
-            )
-        ]
-        promoter.client = AsyncMock()
-        promoter.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_soulstream.complete = AsyncMock(return_value=SoulstreamResult(
+            content=json.dumps(response_data), input_tokens=100, output_tokens=50, session_id="test",
+        ))
 
         result = await promoter.promote(
             candidates=[{"ts": "t", "priority": "🔴", "content": "테스트"}],
@@ -174,13 +174,12 @@ class TestPromoterPromote:
 
         assert result.promoted_count == 1
         assert "승격 항목" in result.promoted[0]["content"]
-        promoter.client.chat.completions.create.assert_called_once()
+        mock_soulstream.complete.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_promote_api_error_propagates(self):
-        promoter = Promoter(api_key="test-key")
-        promoter.client = AsyncMock()
-        promoter.client.chat.completions.create = AsyncMock(
+    async def test_promote_api_error_propagates(self, mock_soulstream):
+        promoter = Promoter(soulstream_client=mock_soulstream)
+        mock_soulstream.complete = AsyncMock(
             side_effect=Exception("API Error")
         )
 
@@ -192,24 +191,23 @@ class TestPromoterPromote:
 
 
 class TestCompactorCompact:
+    @pytest.fixture
+    def mock_soulstream(self):
+        return AsyncMock(spec=SoulstreamClient)
+
     @pytest.mark.asyncio
-    async def test_compact_calls_api(self):
-        compactor = Compactor(api_key="test-key", model="test-model")
+    async def test_compact_calls_api(self, mock_soulstream):
+        compactor = Compactor(soulstream_client=mock_soulstream, model="test-model")
         response_data = [{"priority": "🔴", "content": "압축된 핵심"}]
-        mock_response = MagicMock()
-        mock_response.choices = [
-            MagicMock(
-                message=MagicMock(content=json.dumps(response_data))
-            )
-        ]
-        compactor.client = AsyncMock()
-        compactor.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        mock_soulstream.complete = AsyncMock(return_value=SoulstreamResult(
+            content=json.dumps(response_data), input_tokens=100, output_tokens=50, session_id="test",
+        ))
 
         result = await compactor.compact(persistent=[_make_ltm_item()], target_tokens=8000)
 
         assert len(result.compacted) >= 1
         assert result.token_count > 0
-        compactor.client.chat.completions.create.assert_called_once()
+        mock_soulstream.complete.assert_called_once()
 
 
 # ── Pipeline integration: _try_promote ───────────────────────

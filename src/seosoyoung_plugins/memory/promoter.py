@@ -2,14 +2,18 @@
 
 장기 기억 후보를 검토하여 승격(Promoter)하고,
 장기 기억이 임계치를 넘으면 압축(Compactor)합니다.
+
+소울스트림 LLM 프록시를 통해 API를 호출합니다.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import openai
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 from seosoyoung_plugins.memory.prompts import build_compactor_prompt, build_promoter_prompt
 from seosoyoung_plugins.memory.store import generate_ltm_id
@@ -181,8 +185,8 @@ def parse_compactor_output(
 class Promoter:
     """장기 기억 후보를 검토하여 승격"""
 
-    def __init__(self, api_key: str, model: str = "gpt-5.2"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5.2"):
+        self.client = soulstream_client
         self.model = model
 
     async def promote(
@@ -201,14 +205,15 @@ class Promoter:
         """
         prompt = build_promoter_prompt(existing_persistent, candidates)
 
-        response = await self.client.chat.completions.create(
+        result = await self.client.complete(
+            provider="openai",
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=8_000,
+            max_tokens=8_000,
+            client_id="memory",
         )
 
-        result_text = response.choices[0].message.content or ""
-        return parse_promoter_output(result_text, existing_persistent)
+        return parse_promoter_output(result.content, existing_persistent)
 
     @staticmethod
     def merge_promoted(existing: list[dict], promoted: list[dict]) -> list[dict]:
@@ -233,8 +238,8 @@ class Promoter:
 class Compactor:
     """장기 기억을 압축"""
 
-    def __init__(self, api_key: str, model: str = "gpt-5.2"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5.2"):
+        self.client = soulstream_client
         self.model = model
         self.token_counter = TokenCounter()
 
@@ -254,14 +259,15 @@ class Compactor:
         """
         prompt = build_compactor_prompt(persistent, target_tokens)
 
-        response = await self.client.chat.completions.create(
+        result = await self.client.complete(
+            provider="openai",
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=16_000,
+            max_tokens=16_000,
+            client_id="memory",
         )
 
-        result_text = response.choices[0].message.content or ""
-        compacted = parse_compactor_output(result_text, persistent)
+        compacted = parse_compactor_output(result.content, persistent)
         token_count = self.token_counter.count_string(
             json.dumps(compacted, ensure_ascii=False)
         )

@@ -1,7 +1,9 @@
 """ChannelObserver + DigestCompressor 단위 테스트"""
 
 import pytest
+from unittest.mock import AsyncMock
 
+from seosoyoung_plugins.soulstream_client import SoulstreamClient, SoulstreamResult
 from seosoyoung_plugins.channel_observer.observer import (
     ChannelObserver,
     ChannelObserverResult,
@@ -131,8 +133,8 @@ class TestChannelObserver:
             '<react target="111.222" emoji="eyes" />\n'
             '</reaction>'
         )
-        observer = ChannelObserver(api_key="fake-key", model="gpt-5-mini")
-        observer.client = _make_mock_client(mock_response_text)
+        mock_client = _make_mock_client(mock_response_text)
+        observer = ChannelObserver(soulstream_client=mock_client, model="gpt-5-mini")
 
         result = await observer.observe(
             channel_id="C123",
@@ -155,8 +157,8 @@ class TestChannelObserver:
             '<importance>3</importance>\n'
             '<reaction type="none" />'
         )
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_response_text)
+        mock_client = _make_mock_client(mock_response_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.observe(
             channel_id="C123",
@@ -171,8 +173,8 @@ class TestChannelObserver:
     @pytest.mark.asyncio
     async def test_observe_api_error(self):
         """API 호출 실패 시 None 반환"""
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_error_client(Exception("API error"))
+        mock_client = _make_error_client(Exception("API error"))
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.observe(
             channel_id="C123",
@@ -192,8 +194,8 @@ class TestDigestCompressor:
     async def test_compress_under_target(self):
         """1차 시도에서 목표 이하면 바로 반환"""
         mock_text = "<digest>압축된 내용</digest>"
-        compressor = DigestCompressor(api_key="fake-key", model="gpt-5.2")
-        compressor.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        compressor = DigestCompressor(soulstream_client=mock_client, model="gpt-5.2")
 
         result = await compressor.compress(
             digest="매우 긴 기존 digest 내용...",
@@ -208,29 +210,24 @@ class TestDigestCompressor:
     async def test_compress_retry_on_over_target(self):
         """1차가 목표 초과하면 2차 시도"""
         # 1차: 긴 텍스트, 2차: 짧은 텍스트
-        call_count = 0
+        mock_client = AsyncMock(spec=SoulstreamClient)
+        call_count_ref = [0]
 
-        class MockCompletions:
-            async def create(self, **kwargs):
-                nonlocal call_count
-                call_count += 1
-                if call_count == 1:
-                    # 1차: 목표 토큰 초과하도록 긴 텍스트
-                    return _mock_response(
-                        "<digest>" + "가나다라마바사 " * 100 + "</digest>"
-                    )
-                else:
-                    # 2차: 짧은 텍스트
-                    return _mock_response("<digest>최종 압축</digest>")
+        async def mock_complete(**kwargs):
+            call_count_ref[0] += 1
+            if call_count_ref[0] == 1:
+                return SoulstreamResult(
+                    content="<digest>" + "가나다라마바사 " * 100 + "</digest>",
+                    input_tokens=100, output_tokens=50, session_id="test",
+                )
+            else:
+                return SoulstreamResult(
+                    content="<digest>최종 압축</digest>",
+                    input_tokens=100, output_tokens=50, session_id="test",
+                )
 
-        class MockChat:
-            completions = MockCompletions()
-
-        class MockClient:
-            chat = MockChat()
-
-        compressor = DigestCompressor(api_key="fake-key")
-        compressor.client = MockClient()
+        mock_client.complete = AsyncMock(side_effect=mock_complete)
+        compressor = DigestCompressor(soulstream_client=mock_client)
 
         result = await compressor.compress(
             digest="원본 digest",
@@ -238,12 +235,12 @@ class TestDigestCompressor:
         )
 
         assert result is not None
-        assert call_count == 2
+        assert call_count_ref[0] == 2
 
     @pytest.mark.asyncio
     async def test_compress_api_error(self):
-        compressor = DigestCompressor(api_key="fake-key")
-        compressor.client = _make_error_client(Exception("API error"))
+        mock_client = _make_error_client(Exception("API error"))
+        compressor = DigestCompressor(soulstream_client=mock_client)
 
         result = await compressor.compress(
             digest="some digest",
@@ -691,8 +688,8 @@ class TestChannelObserverJudgeMulti:
             '</judgment>\n'
             '</judgments>'
         )
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.judge(
             channel_id="C123",
@@ -720,8 +717,8 @@ class TestChannelObserverDigest:
     @pytest.mark.asyncio
     async def test_digest_success(self):
         mock_text = "<digest>소화된 요약 내용</digest>"
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.digest(
             channel_id="C123",
@@ -737,8 +734,8 @@ class TestChannelObserverDigest:
     @pytest.mark.asyncio
     async def test_digest_with_existing(self):
         mock_text = "<digest>기존 + 새 내용</digest>"
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.digest(
             channel_id="C123",
@@ -751,8 +748,8 @@ class TestChannelObserverDigest:
 
     @pytest.mark.asyncio
     async def test_digest_api_error(self):
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_error_client(Exception("API error"))
+        mock_client = _make_error_client(Exception("API error"))
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.digest(
             channel_id="C123",
@@ -775,8 +772,8 @@ class TestChannelObserverJudge:
             '<react target="111.222" emoji="eyes" />\n'
             '</reaction>'
         )
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.judge(
             channel_id="C123",
@@ -798,8 +795,8 @@ class TestChannelObserverJudge:
             '<importance>1</importance>\n'
             '<reaction type="none" />'
         )
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_mock_client(mock_text)
+        mock_client = _make_mock_client(mock_text)
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.judge(
             channel_id="C123",
@@ -813,8 +810,8 @@ class TestChannelObserverJudge:
 
     @pytest.mark.asyncio
     async def test_judge_api_error(self):
-        observer = ChannelObserver(api_key="fake-key")
-        observer.client = _make_error_client(Exception("API error"))
+        mock_client = _make_error_client(Exception("API error"))
+        observer = ChannelObserver(soulstream_client=mock_client)
 
         result = await observer.judge(
             channel_id="C123",
@@ -917,47 +914,21 @@ class TestChannelPrompts:
 
 # ── 헬퍼 ─────────────────────────────────────────────────
 
-def _mock_response(content: str):
-    """OpenAI chat.completions.create 응답 mock"""
-
-    class Choice:
-        def __init__(self):
-            self.message = type("Message", (), {"content": content})()
-
-    class Response:
-        def __init__(self):
-            self.choices = [Choice()]
-
-    return Response()
-
 
 def _make_mock_client(response_text: str):
-    """정상 응답을 반환하는 mock OpenAI 클라이언트"""
-
-    class MockCompletions:
-        async def create(self, **kwargs):
-            return _mock_response(response_text)
-
-    class MockChat:
-        completions = MockCompletions()
-
-    class MockClient:
-        chat = MockChat()
-
-    return MockClient()
+    """정상 응답을 반환하는 mock SoulstreamClient"""
+    mock = AsyncMock(spec=SoulstreamClient)
+    mock.complete = AsyncMock(return_value=SoulstreamResult(
+        content=response_text,
+        input_tokens=100,
+        output_tokens=50,
+        session_id="test",
+    ))
+    return mock
 
 
 def _make_error_client(error: Exception):
-    """에러를 발생시키는 mock OpenAI 클라이언트"""
-
-    class MockCompletions:
-        async def create(self, **kwargs):
-            raise error
-
-    class MockChat:
-        completions = MockCompletions()
-
-    class MockClient:
-        chat = MockChat()
-
-    return MockClient()
+    """에러를 발생시키는 mock SoulstreamClient"""
+    mock = AsyncMock(spec=SoulstreamClient)
+    mock.complete = AsyncMock(side_effect=error)
+    return mock

@@ -2,14 +2,18 @@
 
 채널 버퍼를 읽고 digest를 갱신하며, 반응 판단(none/react/intervene)을 수행합니다.
 DigestCompressor는 digest가 임계치를 초과할 때 압축합니다.
+
+소울스트림 LLM 프록시를 통해 API를 호출합니다.
 """
+
+from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-import openai
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 from seosoyoung_plugins.channel_observer.prompts import (
     build_channel_observer_system_prompt,
@@ -277,8 +281,8 @@ def _parse_reaction(text: str) -> tuple[str, Optional[str], Optional[str]]:
 class ChannelObserver:
     """채널 대화를 관찰하여 digest를 갱신하고 반응을 판단"""
 
-    def __init__(self, api_key: str, model: str = "gpt-5-mini"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5-mini"):
+        self.client = soulstream_client
         self.model = model
 
     async def observe(
@@ -308,17 +312,18 @@ class ChannelObserver:
         )
 
         try:
-            response = await self.client.chat.completions.create(
+            result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="channel-observer",
             )
 
-            result_text = response.choices[0].message.content or ""
-            return parse_channel_observer_output(result_text)
+            return parse_channel_observer_output(result.content)
 
         except Exception as e:
             logger.error(f"ChannelObserver API 호출 실패: {e}")
@@ -348,19 +353,20 @@ class ChannelObserver:
         )
 
         try:
-            response = await self.client.chat.completions.create(
+            result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="channel-observer",
             )
 
-            result_text = response.choices[0].message.content or ""
-            digest_text = _extract_tag(result_text, "digest")
+            digest_text = _extract_tag(result.content, "digest")
             if not digest_text:
-                digest_text = result_text.strip()
+                digest_text = result.content.strip()
 
             token_counter = TokenCounter()
             token_count = token_counter.count_string(digest_text)
@@ -407,17 +413,18 @@ class ChannelObserver:
         )
 
         try:
-            response = await self.client.chat.completions.create(
+            result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                max_completion_tokens=8_000,
+                max_tokens=8_000,
+                client_id="channel-observer",
             )
 
-            result_text = response.choices[0].message.content or ""
-            return parse_judge_output(result_text)
+            return parse_judge_output(result.content)
 
         except Exception as e:
             logger.error(f"ChannelObserver.judge API 호출 실패: {e}")
@@ -427,8 +434,8 @@ class ChannelObserver:
 class DigestCompressor:
     """digest가 임계치를 초과할 때 압축"""
 
-    def __init__(self, api_key: str, model: str = "gpt-5.2"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5.2"):
+        self.client = soulstream_client
         self.model = model
         self.token_counter = TokenCounter()
 
@@ -450,16 +457,18 @@ class DigestCompressor:
 
         try:
             # 1차 시도
-            response = await self.client.chat.completions.create(
+            result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": digest},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="channel-observer",
             )
 
-            result_text = response.choices[0].message.content or ""
+            result_text = result.content
             compressed = _extract_tag(result_text, "digest") or result_text.strip()
             token_count = self.token_counter.count_string(compressed)
 
@@ -477,7 +486,8 @@ class DigestCompressor:
             retry_prompt = build_digest_compressor_retry_prompt(
                 token_count, target_tokens
             )
-            response = await self.client.chat.completions.create(
+            retry_result = await self.client.complete(
+                provider="openai",
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -485,10 +495,11 @@ class DigestCompressor:
                     {"role": "assistant", "content": result_text},
                     {"role": "user", "content": retry_prompt},
                 ],
-                max_completion_tokens=16_000,
+                max_tokens=16_000,
+                client_id="channel-observer",
             )
 
-            retry_text = response.choices[0].message.content or ""
+            retry_text = retry_result.content
             compressed = _extract_tag(retry_text, "digest") or retry_text.strip()
             token_count = self.token_counter.count_string(compressed)
 
