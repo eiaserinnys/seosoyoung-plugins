@@ -22,6 +22,49 @@ class SoulstreamResult:
     session_id: str
 
 
+def _build_payload(
+    provider: str,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float | None,
+    client_id: str | None,
+) -> dict:
+    """LLM 프록시 요청 페이로드를 생성합니다."""
+    payload: dict = {
+        "provider": provider,
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if client_id is not None:
+        payload["client_id"] = client_id
+    return payload
+
+
+def _parse_response(data: dict) -> SoulstreamResult:
+    """프록시 응답을 검증하고 SoulstreamResult로 변환합니다.
+
+    시스템 경계에서의 검증: 프록시가 예상과 다른 구조를 반환하면
+    KeyError 대신 명확한 ValueError를 발생시킵니다.
+    """
+    try:
+        return SoulstreamResult(
+            content=data["content"],
+            input_tokens=data["usage"]["input_tokens"],
+            output_tokens=data["usage"]["output_tokens"],
+            session_id=data["session_id"],
+        )
+    except (KeyError, TypeError) as e:
+        keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+        raise ValueError(
+            f"Unexpected response structure from LLM proxy: {e!r}. "
+            f"Response keys: {keys}"
+        ) from e
+
+
 class SoulstreamClient:
     """비동기 LLM 프록시 클라이언트
 
@@ -57,29 +100,22 @@ class SoulstreamClient:
         Returns:
             SoulstreamResult
         """
-        resp = await self._client.post(
-            "/llm/completions",
-            json={
-                "provider": provider,
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "client_id": client_id,
-            },
+        payload = _build_payload(
+            provider, model, messages, max_tokens, temperature, client_id,
         )
+        resp = await self._client.post("/llm/completions", json=payload)
         resp.raise_for_status()
-        data = resp.json()
-        return SoulstreamResult(
-            content=data["content"],
-            input_tokens=data["usage"]["input_tokens"],
-            output_tokens=data["usage"]["output_tokens"],
-            session_id=data["session_id"],
-        )
+        return _parse_response(resp.json())
 
     async def close(self):
         """클라이언트를 닫습니다."""
         await self._client.aclose()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
 
 
 class SoulstreamSyncClient:
@@ -117,26 +153,19 @@ class SoulstreamSyncClient:
         Returns:
             SoulstreamResult
         """
-        resp = self._client.post(
-            "/llm/completions",
-            json={
-                "provider": provider,
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "client_id": client_id,
-            },
+        payload = _build_payload(
+            provider, model, messages, max_tokens, temperature, client_id,
         )
+        resp = self._client.post("/llm/completions", json=payload)
         resp.raise_for_status()
-        data = resp.json()
-        return SoulstreamResult(
-            content=data["content"],
-            input_tokens=data["usage"]["input_tokens"],
-            output_tokens=data["usage"]["output_tokens"],
-            session_id=data["session_id"],
-        )
+        return _parse_response(resp.json())
 
     def close(self):
         """클라이언트를 닫습니다."""
         self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
