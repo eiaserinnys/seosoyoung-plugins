@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from seosoyoung_plugins.soulstream_client import SoulstreamClient, SoulstreamResult
 from seosoyoung_plugins.memory.observer import (
     Observer,
     ObserverResult,
@@ -151,8 +152,12 @@ class TestObserverPrompts:
 
 class TestObserverObserve:
     @pytest.fixture
-    def observer(self):
-        return Observer(api_key="test-key", model="gpt-4.1-mini")
+    def mock_soulstream(self):
+        return AsyncMock(spec=SoulstreamClient)
+
+    @pytest.fixture
+    def observer(self, mock_soulstream):
+        return Observer(soulstream_client=mock_soulstream, model="gpt-4.1-mini")
 
     @pytest.fixture
     def sample_messages(self):
@@ -169,26 +174,21 @@ class TestObserverObserve:
                 {"priority": "🔴", "content": "Test observation", "session_date": "2026-02-10"},
             ],
         })
-        mock_response = MagicMock()
-        mock_response.choices = [
-            MagicMock(message=MagicMock(content=api_response))
-        ]
-
-        observer.client = AsyncMock()
-        observer.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        observer.client.complete = AsyncMock(return_value=SoulstreamResult(
+            content=api_response, input_tokens=100, output_tokens=50, session_id="test",
+        ))
 
         result = await observer.observe(None, sample_messages)
 
         assert result is not None
         assert len(result.observations) == 1
         assert result.observations[0]["content"] == "Test observation"
-        observer.client.chat.completions.create.assert_called_once()
+        observer.client.complete.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_observe_raises_on_api_error(self, observer, sample_messages):
         """API 오류 시 예외가 전파됨 (파이프라인에서 처리)"""
-        observer.client = AsyncMock()
-        observer.client.chat.completions.create = AsyncMock(
+        observer.client.complete = AsyncMock(
             side_effect=Exception("API Error")
         )
 
@@ -208,18 +208,14 @@ class TestObserverObserve:
                 {"priority": "🟡", "content": "Updated observation", "session_date": "2026-02-10"},
             ],
         })
-        mock_response = MagicMock()
-        mock_response.choices = [
-            MagicMock(message=MagicMock(content=api_response))
-        ]
-
-        observer.client = AsyncMock()
-        observer.client.chat.completions.create = AsyncMock(return_value=mock_response)
+        observer.client.complete = AsyncMock(return_value=SoulstreamResult(
+            content=api_response, input_tokens=100, output_tokens=50, session_id="test",
+        ))
 
         result = await observer.observe(existing, sample_messages)
 
         assert result is not None
         # API 호출 시 기존 관찰이 포함되었는지 확인
-        call_args = observer.client.chat.completions.create.call_args
+        call_args = observer.client.complete.call_args
         user_msg = call_args.kwargs["messages"][1]["content"]
         assert "Previous observation" in user_msg

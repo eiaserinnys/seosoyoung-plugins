@@ -3,14 +3,15 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
+from seosoyoung_plugins.soulstream_client import SoulstreamSyncClient, SoulstreamResult
 from seosoyoung_plugins.translate.translator import (
     translate,
     _build_context_text,
     _build_prompt,
     _build_glossary_section,
     _calculate_cost,
-    _translate_openai,
-    _translate_anthropic,
+    _translate_via_soulstream,
+    _backend_to_provider,
 )
 from seosoyoung_plugins.translate.detector import Language
 from seosoyoung_plugins.translate.glossary import GlossaryMatchResult
@@ -185,50 +186,44 @@ class TestCalculateCost:
 
 
 class TestTranslate:
-    """번역 함수 테스트"""
+    """번역 함수 테스트 (소울스트림 프록시 경유)"""
 
-    @patch("seosoyoung_plugins.translate.translator.anthropic.Anthropic")
-    def test_translate_korean_to_english(self, mock_anthropic_class):
+    def _make_mock_client(self, content="Hello", input_tokens=100, output_tokens=10):
+        mock_client = MagicMock(spec=SoulstreamSyncClient)
+        mock_client.complete.return_value = SoulstreamResult(
+            content=content, input_tokens=input_tokens,
+            output_tokens=output_tokens, session_id="test",
+        )
+        return mock_client
+
+    def test_translate_korean_to_english(self):
         """한국어 -> 영어 번역"""
-        mock_client = MagicMock()
-        mock_anthropic_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Hello")]
-        mock_response.usage.input_tokens = 100
-        mock_response.usage.output_tokens = 10
-        mock_client.messages.create.return_value = mock_response
+        mock_client = self._make_mock_client("Hello")
 
         text, cost, terms, match_result = translate(
             "안녕하세요", Language.KOREAN,
             backend="anthropic",
             model="claude-3-5-haiku-latest",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
         assert text == "Hello"
         assert cost > 0
         assert isinstance(terms, list)
-        mock_client.messages.create.assert_called_once()
+        mock_client.complete.assert_called_once()
+        call_args = mock_client.complete.call_args
+        assert call_args.kwargs["provider"] == "anthropic"
 
-    @patch("seosoyoung_plugins.translate.translator.anthropic.Anthropic")
-    def test_translate_english_to_korean(self, mock_anthropic_class):
+    def test_translate_english_to_korean(self):
         """영어 -> 한국어 번역"""
-        mock_client = MagicMock()
-        mock_anthropic_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="안녕하세요")]
-        mock_response.usage.input_tokens = 100
-        mock_response.usage.output_tokens = 10
-        mock_client.messages.create.return_value = mock_response
+        mock_client = self._make_mock_client("안녕하세요")
 
         text, cost, terms, match_result = translate(
             "Hello", Language.ENGLISH,
             backend="anthropic",
             model="claude-3-5-haiku-latest",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
@@ -238,41 +233,33 @@ class TestTranslate:
 
     def test_translate_invalid_backend(self):
         """잘못된 backend 호출 시 에러"""
+        mock_client = self._make_mock_client()
         with pytest.raises(ValueError, match="Unknown backend"):
             translate(
                 "Hello", Language.ENGLISH,
                 backend="invalid",
                 model="test-model",
-                api_key="test-key",
+                soulstream_client=mock_client,
                 glossary_path="",
             )
 
-    @patch("seosoyoung_plugins.translate.translator.anthropic.Anthropic")
-    def test_translate_with_custom_model(self, mock_anthropic_class):
+    def test_translate_with_custom_model(self):
         """커스텀 모델 사용"""
-        mock_client = MagicMock()
-        mock_anthropic_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Result")]
-        mock_response.usage.input_tokens = 100
-        mock_response.usage.output_tokens = 10
-        mock_client.messages.create.return_value = mock_response
+        mock_client = self._make_mock_client("Result")
 
         translate(
             "Test", Language.ENGLISH,
             backend="anthropic",
             model="custom-model",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
-        call_args = mock_client.messages.create.call_args
+        call_args = mock_client.complete.call_args
         assert call_args.kwargs["model"] == "custom-model"
 
     @patch("seosoyoung_plugins.translate.translator.find_relevant_terms_v2")
-    @patch("seosoyoung_plugins.translate.translator.anthropic.Anthropic")
-    def test_translate_returns_glossary_terms(self, mock_anthropic_class, mock_find_terms_v2):
+    def test_translate_returns_glossary_terms(self, mock_find_terms_v2):
         """번역 시 참고한 용어 목록 반환"""
         mock_result = GlossaryMatchResult(
             matched_terms=[("펜릭스", "Fenrix"), ("아리엘라", "Ariella")],
@@ -281,20 +268,13 @@ class TestTranslate:
         )
         mock_find_terms_v2.return_value = mock_result
 
-        mock_client = MagicMock()
-        mock_anthropic_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Fenrix and Ariella")]
-        mock_response.usage.input_tokens = 100
-        mock_response.usage.output_tokens = 10
-        mock_client.messages.create.return_value = mock_response
+        mock_client = self._make_mock_client("Fenrix and Ariella")
 
         text, cost, terms, match_result = translate(
             "펜릭스와 아리엘라", Language.KOREAN,
             backend="anthropic",
             model="claude-3-5-haiku-latest",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
@@ -302,105 +282,88 @@ class TestTranslate:
         assert terms == [("펜릭스", "Fenrix"), ("아리엘라", "Ariella")]
 
 
-class TestTranslateOpenAI:
-    """OpenAI 번역 테스트"""
+class TestTranslateSoulstream:
+    """소울스트림 프록시 번역 테스트"""
 
-    @patch("seosoyoung_plugins.translate.translator.openai.OpenAI")
-    def test_translate_openai_korean_to_english(self, mock_openai_class):
+    def _make_mock_client(self, content="Hello", input_tokens=100, output_tokens=10):
+        mock_client = MagicMock(spec=SoulstreamSyncClient)
+        mock_client.complete.return_value = SoulstreamResult(
+            content=content, input_tokens=input_tokens,
+            output_tokens=output_tokens, session_id="test",
+        )
+        return mock_client
+
+    def test_translate_openai_backend(self):
         """OpenAI backend로 한국어 -> 영어 번역"""
-        mock_client = MagicMock()
-        mock_openai_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Hello"))]
-        mock_response.usage.prompt_tokens = 100
-        mock_response.usage.completion_tokens = 10
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client = self._make_mock_client("Hello")
 
         text, cost, terms, match_result = translate(
             "안녕하세요", Language.KOREAN,
             backend="openai",
             model="gpt-5-mini",
-            api_key="test-openai-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
         assert text == "Hello"
         assert cost > 0
-        mock_client.chat.completions.create.assert_called_once()
-        call_args = mock_client.chat.completions.create.call_args
+        mock_client.complete.assert_called_once()
+        call_args = mock_client.complete.call_args
+        assert call_args.kwargs["provider"] == "openai"
         assert call_args.kwargs["model"] == "gpt-5-mini"
 
-    @patch("seosoyoung_plugins.translate.translator.anthropic.Anthropic")
-    def test_translate_backend_switch_to_anthropic(self, mock_anthropic_class):
+    def test_translate_anthropic_backend(self):
         """backend 파라미터로 anthropic 명시적 지정"""
-        mock_client = MagicMock()
-        mock_anthropic_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="안녕하세요")]
-        mock_response.usage.input_tokens = 100
-        mock_response.usage.output_tokens = 10
-        mock_client.messages.create.return_value = mock_response
+        mock_client = self._make_mock_client("안녕하세요")
 
         text, cost, terms, match_result = translate(
             "Hello", Language.ENGLISH,
             backend="anthropic",
             model="claude-3-5-haiku-latest",
-            api_key="test-anthropic-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
         assert text == "안녕하세요"
-        mock_client.messages.create.assert_called_once()
+        call_args = mock_client.complete.call_args
+        assert call_args.kwargs["provider"] == "anthropic"
 
-    @patch("seosoyoung_plugins.translate.translator.openai.OpenAI")
-    def test_translate_openai_uses_max_completion_tokens(self, mock_openai_class):
-        """OpenAI API 호출 시 max_completion_tokens 사용 (max_tokens 아님)"""
-        mock_client = MagicMock()
-        mock_openai_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Hello"))]
-        mock_response.usage.prompt_tokens = 100
-        mock_response.usage.completion_tokens = 10
-        mock_client.chat.completions.create.return_value = mock_response
+    def test_translate_uses_max_tokens(self):
+        """소울스트림 호출 시 max_tokens=2048 사용"""
+        mock_client = self._make_mock_client("Hello")
 
         translate(
             "안녕하세요", Language.KOREAN,
             backend="openai",
             model="gpt-5-mini",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
-        call_args = mock_client.chat.completions.create.call_args
-        assert "max_completion_tokens" in call_args.kwargs
-        assert "max_tokens" not in call_args.kwargs
-        assert call_args.kwargs["max_completion_tokens"] == 2048
+        call_args = mock_client.complete.call_args
+        assert call_args.kwargs["max_tokens"] == 2048
 
-    @patch("seosoyoung_plugins.translate.translator.openai.OpenAI")
-    def test_translate_openai_custom_model(self, mock_openai_class):
-        """OpenAI에서 커스텀 모델 사용"""
-        mock_client = MagicMock()
-        mock_openai_class.return_value = mock_client
-
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock(message=MagicMock(content="Result"))]
-        mock_response.usage.prompt_tokens = 100
-        mock_response.usage.completion_tokens = 10
-        mock_client.chat.completions.create.return_value = mock_response
+    def test_translate_custom_model(self):
+        """커스텀 모델 사용"""
+        mock_client = self._make_mock_client("Result")
 
         translate(
             "Test", Language.ENGLISH,
             backend="openai",
             model="gpt-4o",
-            api_key="test-key",
+            soulstream_client=mock_client,
             glossary_path="",
         )
 
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.complete.call_args
         assert call_args.kwargs["model"] == "gpt-4o"
+
+    def test_backend_to_provider(self):
+        """backend -> provider 변환"""
+        assert _backend_to_provider("openai") == "openai"
+        assert _backend_to_provider("anthropic") == "anthropic"
+        with pytest.raises(ValueError):
+            _backend_to_provider("invalid")
 
 
 class TestFormatResponse:
