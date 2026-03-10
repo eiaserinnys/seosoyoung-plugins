@@ -190,7 +190,7 @@ def _translate_via_soulstream(
         provider=provider,
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2048,
+        max_tokens=16384,
         client_id="translate",
     )
     return result.content.strip(), result.input_tokens, result.output_tokens
