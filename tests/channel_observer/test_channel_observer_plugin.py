@@ -16,7 +16,8 @@ from seosoyoung_plugins.channel_observer.plugin import (
 
 SAMPLE_CONFIG = {
     "channels": ["C_OBSERVE1", "C_OBSERVE2"],
-    "api_key": "test-api-key",
+    "soulstream_url": "http://localhost:4105",
+    "soulstream_token": "test-token",
     "model": "gpt-5-mini",
     "compressor_model": "gpt-5.2",
     "memory_path": "/tmp/test_channel_obs",
@@ -56,7 +57,7 @@ class TestChannelObserverPluginLifecycle:
     async def test_on_load_sets_fields(self, plugin):
         await plugin.on_load(SAMPLE_CONFIG)
         assert plugin._channels == ["C_OBSERVE1", "C_OBSERVE2"]
-        assert plugin._api_key == "test-api-key"
+        assert plugin._soulstream is not None
         assert plugin._model == "gpt-5-mini"
         assert plugin._threshold_a == 150
         assert plugin._intervention_threshold == 0.18
@@ -377,26 +378,26 @@ class TestLlmCallCreation:
     """_make_llm_call and _llm_call initialization."""
 
     @pytest.mark.asyncio
-    async def test_llm_call_created_when_api_key_present(self):
-        """api_key가 있으면 on_load 시 _llm_call이 생성됩니다."""
+    async def test_llm_call_created_when_soulstream_present(self):
+        """soulstream_url/token이 있으면 on_load 시 _llm_call이 생성됩니다."""
         p = ChannelObserverPlugin()
         await p.on_load(SAMPLE_CONFIG)
         assert p._llm_call is not None
         assert callable(p._llm_call)
 
     @pytest.mark.asyncio
-    async def test_llm_call_none_when_no_api_key(self):
-        """api_key가 없으면 _llm_call이 None입니다."""
+    async def test_llm_call_none_when_no_soulstream_url(self):
+        """soulstream_url이 없으면 _llm_call이 None입니다."""
         p = ChannelObserverPlugin()
-        config = {**SAMPLE_CONFIG, "api_key": ""}
+        config = {**SAMPLE_CONFIG, "soulstream_url": ""}
         await p.on_load(config)
         assert p._llm_call is None
 
     @pytest.mark.asyncio
-    async def test_llm_call_none_when_api_key_missing(self):
-        """api_key 키 자체가 없으면 _llm_call이 None입니다."""
+    async def test_llm_call_none_when_soulstream_token_missing(self):
+        """soulstream_token이 없으면 _llm_call이 None입니다."""
         p = ChannelObserverPlugin()
-        config = {k: v for k, v in SAMPLE_CONFIG.items() if k != "api_key"}
+        config = {k: v for k, v in SAMPLE_CONFIG.items() if k != "soulstream_token"}
         await p.on_load(config)
         assert p._llm_call is None
 

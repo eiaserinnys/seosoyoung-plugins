@@ -1,15 +1,17 @@
 """Observer 모듈
 
 대화 내용을 분석하여 구조화된 관찰 로그를 생성합니다.
-OpenAI API를 사용하여 대화를 관찰하고, JSON 형식으로 결과를 파싱합니다.
+소울스트림 LLM 프록시를 통해 API를 호출하고, JSON 형식으로 결과를 파싱합니다.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import openai
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 from seosoyoung_plugins.memory.prompts import (
     build_observer_system_prompt,
@@ -145,8 +147,8 @@ def _assign_obs_ids(raw_items: list, existing: list[dict]) -> list[dict]:
 class Observer:
     """대화를 관찰하여 구조화된 관찰 로그를 생성"""
 
-    def __init__(self, api_key: str, model: str = "gpt-4.1-mini"):
-        self.client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-4.1-mini"):
+        self.client = soulstream_client
         self.model = model
 
     async def observe(
@@ -166,14 +168,15 @@ class Observer:
         system_prompt = build_observer_system_prompt()
         user_prompt = build_observer_user_prompt(existing_observations, messages)
 
-        response = await self.client.chat.completions.create(
+        result = await self.client.complete(
+            provider="openai",
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_completion_tokens=16_000,
+            max_tokens=16_000,
+            client_id="memory",
         )
 
-        result_text = response.choices[0].message.content or ""
-        return parse_observer_output(result_text, existing_observations)
+        return parse_observer_output(result.content, existing_observations)
