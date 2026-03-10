@@ -21,8 +21,8 @@ from seosoyoung_plugins.translate.detector import Language
 
 
 SAMPLE_CONFIG = {
-    "api_key": "test-anthropic-key",
-    "openai_api_key": "test-openai-key",
+    "soulstream_url": "http://localhost:4105",
+    "soulstream_token": "test-token",
     "glossary_path": "/tmp/glossary.yaml",
     "channels": ["C_TRANSLATE"],
     "backend": "openai",
@@ -112,16 +112,15 @@ class TestTranslatePluginLifecycle:
         await plugin.on_load(SAMPLE_CONFIG)
         assert plugin._channels == ["C_TRANSLATE"]
         assert plugin._backend == "openai"
-        assert plugin._api_key == "test-anthropic-key"
-        assert plugin._openai_api_key == "test-openai-key"
+        assert plugin._soulstream is not None
         assert plugin._context_count == 5
         assert plugin._show_glossary is False
         assert plugin._show_cost is True
 
     @pytest.mark.asyncio
     async def test_on_load_missing_key_raises(self, plugin):
-        incomplete = {k: v for k, v in SAMPLE_CONFIG.items() if k != "api_key"}
-        with pytest.raises(KeyError, match="api_key"):
+        incomplete = {k: v for k, v in SAMPLE_CONFIG.items() if k != "soulstream_url"}
+        with pytest.raises(KeyError, match="soulstream_url"):
             await plugin.on_load(incomplete)
 
     @pytest.mark.asyncio

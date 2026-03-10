@@ -13,6 +13,7 @@ import threading
 from typing import Any
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,10 @@ class MemoryPlugin(Plugin):
         self._config = config
 
         # Core settings
-        self._openai_api_key: str = config["openai_api_key"]
+        self._soulstream = SoulstreamClient(
+            base_url=config["soulstream_url"],
+            bearer_token=config["soulstream_token"],
+        )
         self._model: str = config.get("model", "gpt-5-mini")
         self._memory_path: str = config["memory_path"]
         self._debug_channel: str = config.get("debug_channel", "")
@@ -67,12 +71,13 @@ class MemoryPlugin(Plugin):
         self._emoji = config.get("emoji", {})
 
         logger.info(
-            "MemoryPlugin loaded: model=%s, memory_path=%s",
+            "MemoryPlugin loaded: model=%s, memory_path=%s (soulstream)",
             self._model,
             self._memory_path,
         )
 
     async def on_unload(self) -> None:
+        await self._soulstream.close()
         logger.info("MemoryPlugin unloaded")
 
     def register_hooks(self) -> dict:
@@ -422,19 +427,19 @@ class MemoryPlugin(Plugin):
 
                 store = MemoryStore(self._memory_path)
                 observer = Observer(
-                    api_key=self._openai_api_key,
+                    soulstream_client=self._soulstream,
                     model=self._model,
                 )
                 reflector = Reflector(
-                    api_key=self._openai_api_key,
+                    soulstream_client=self._soulstream,
                     model=self._model,
                 )
                 promoter = Promoter(
-                    api_key=self._openai_api_key,
+                    soulstream_client=self._soulstream,
                     model=self._promoter_model,
                 )
                 compactor = Compactor(
-                    api_key=self._openai_api_key,
+                    soulstream_client=self._soulstream,
                     model=self._promoter_model,
                 )
                 asyncio.run(

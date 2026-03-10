@@ -1,16 +1,17 @@
 """번역 모듈
 
-Anthropic 또는 OpenAI API를 호출하여 번역합니다.
-backend 파라미터에 따라 분기합니다.
+소울스트림 LLM 프록시를 통해 번역합니다.
+backend 파라미터에 따라 provider를 결정합니다.
 
 이 모듈은 Config에 의존하지 않습니다.
 모든 설정은 호출 시 명시적 파라미터로 전달받습니다.
 """
 
-import logging
-import anthropic
-import openai
+from __future__ import annotations
 
+import logging
+
+from seosoyoung_plugins.soulstream_client import SoulstreamSyncClient
 from seosoyoung_plugins.translate.detector import Language
 from seosoyoung_plugins.translate.glossary import find_relevant_terms_v2, GlossaryMatchResult
 from seosoyoung_plugins.translate.slack_escape import escape_slack_markup, unescape_slack_markup
@@ -168,38 +169,48 @@ def _calculate_cost(input_tokens: int, output_tokens: int, model: str) -> float:
     return input_cost + output_cost
 
 
-def _translate_anthropic(prompt: str, model: str, api_key: str) -> tuple[str, int, int]:
-    """Anthropic API로 번역
+def _translate_via_soulstream(
+    prompt: str,
+    model: str,
+    provider: str,
+    client: SoulstreamSyncClient,
+) -> tuple[str, int, int]:
+    """소울스트림 프록시를 통해 번역
+
+    Args:
+        prompt: 번역 프롬프트
+        model: 사용할 모델명
+        provider: "openai" 또는 "anthropic"
+        client: 소울스트림 동기 클라이언트
 
     Returns:
         (번역된 텍스트, 입력 토큰 수, 출력 토큰 수)
     """
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
+    result = client.complete(
+        provider=provider,
         model=model,
+        messages=[{"role": "user", "content": prompt}],
         max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
+        client_id="translate",
     )
-    translated = response.content[0].text.strip()
-    return translated, response.usage.input_tokens, response.usage.output_tokens
+    return result.content.strip(), result.input_tokens, result.output_tokens
 
 
-def _translate_openai(prompt: str, model: str, api_key: str) -> tuple[str, int, int]:
-    """OpenAI API로 번역
+def _backend_to_provider(backend: str) -> str:
+    """backend 문자열을 provider로 변환합니다.
+
+    Args:
+        backend: "openai" 또는 "anthropic"
 
     Returns:
-        (번역된 텍스트, 입력 토큰 수, 출력 토큰 수)
+        provider 문자열
+
+    Raises:
+        ValueError: 잘못된 backend
     """
-    client = openai.OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=2048,
-    )
-    translated = response.choices[0].message.content.strip()
-    input_tokens = response.usage.prompt_tokens
-    output_tokens = response.usage.completion_tokens
-    return translated, input_tokens, output_tokens
+    if backend in ("openai", "anthropic"):
+        return backend
+    raise ValueError(f"Unknown backend: {backend}")
 
 
 def translate(
@@ -208,7 +219,7 @@ def translate(
     *,
     backend: str,
     model: str,
-    api_key: str,
+    soulstream_client: SoulstreamSyncClient,
     glossary_path: str,
     context_messages: list[dict] | None = None,
 ) -> tuple[str, float, list[tuple[str, str]], GlossaryMatchResult | None]:
@@ -219,7 +230,7 @@ def translate(
         source_lang: 원본 언어
         backend: 번역 백엔드 ("anthropic" | "openai")
         model: 사용할 모델명
-        api_key: API 키
+        soulstream_client: 소울스트림 동기 클라이언트
         glossary_path: 용어집 파일 경로
         context_messages: 이전 대화 컨텍스트
 
@@ -233,14 +244,13 @@ def translate(
         text, source_lang, glossary_path, context_messages
     )
 
+    provider = _backend_to_provider(backend)
+
     logger.debug(f"번역 요청 [{backend}]: {text[:50]}... -> {source_lang.value}")
 
-    if backend == "openai":
-        translated, input_tokens, output_tokens = _translate_openai(prompt, model, api_key)
-    elif backend == "anthropic":
-        translated, input_tokens, output_tokens = _translate_anthropic(prompt, model, api_key)
-    else:
-        raise ValueError(f"Unknown backend: {backend}")
+    translated, input_tokens, output_tokens = _translate_via_soulstream(
+        prompt, model, provider, soulstream_client,
+    )
 
     # 슬랙 마크업 복원
     translated = unescape_slack_markup(translated, slack_replacements)

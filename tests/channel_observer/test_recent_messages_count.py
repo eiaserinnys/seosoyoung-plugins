@@ -14,7 +14,8 @@ from seosoyoung_plugins.channel_observer.plugin import ChannelObserverPlugin
 
 SAMPLE_CONFIG = {
     "channels": ["C_TEST"],
-    "api_key": "test-key",
+    "soulstream_url": "http://localhost:4105",
+    "soulstream_token": "test-token",
     "model": "gpt-5-mini",
     "compressor_model": "gpt-5.2",
     "memory_path": "/tmp/test_recent_msgs",

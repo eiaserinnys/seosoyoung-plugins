@@ -36,8 +36,10 @@ dependencies = [
     "rapidfuzz>=3.0.0",
     "kiwipiepy>=0.18.0",
 
+    # Soulstream LLM proxy client
+    "httpx>=0.27.0",
+
     # Memory/Observer plugins
-    "openai>=1.0.0",
     "tiktoken>=0.7.0",
     "filelock>=3.13.0",
 

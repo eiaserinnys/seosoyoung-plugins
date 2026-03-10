@@ -14,6 +14,7 @@ import threading
 from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
+from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,21 @@ class ChannelObserverPlugin(Plugin):
 
         # Core settings
         self._channels: list[str] = config.get("channels", [])
-        self._api_key: str = config.get("api_key", "")
         self._model: str = config.get("model", "gpt-5-mini")
         self._compressor_model: str = config.get(
             "compressor_model", "gpt-5.2"
         )
         self._memory_path: str = config["memory_path"]
+
+        # Soulstream client
+        soulstream_url = config.get("soulstream_url", "")
+        soulstream_token = config.get("soulstream_token", "")
+        self._soulstream: SoulstreamClient | None = None
+        if soulstream_url and soulstream_token:
+            self._soulstream = SoulstreamClient(
+                base_url=soulstream_url,
+                bearer_token=soulstream_token,
+            )
 
         # Thresholds
         self._threshold_a: int = config.get("threshold_a", 150)
@@ -76,7 +86,9 @@ class ChannelObserverPlugin(Plugin):
         self._observer_engine = None
         self._compressor = None
         self._scheduler = None
-        self._llm_call = self._make_llm_call() if self._api_key else None
+        self._llm_call = (
+            self._make_llm_call() if self._soulstream else None
+        )
 
         logger.info(
             "ChannelObserverPlugin loaded: channels=%s, threshold_a=%d",
@@ -88,6 +100,8 @@ class ChannelObserverPlugin(Plugin):
         if self._scheduler:
             self._scheduler.stop()
             logger.info("ChannelObserverPlugin: scheduler stopped")
+        if self._soulstream:
+            await self._soulstream.close()
 
     def register_hooks(self) -> dict:
         return {
@@ -136,13 +150,13 @@ class ChannelObserverPlugin(Plugin):
         )
         self._cooldown = InterventionHistory(base_dir=self._memory_path)
 
-        if self._api_key:
+        if self._soulstream:
             self._observer_engine = ChannelObserver(
-                api_key=self._api_key,
+                soulstream_client=self._soulstream,
                 model=self._model,
             )
             self._compressor = DigestCompressor(
-                api_key=self._api_key,
+                soulstream_client=self._soulstream,
                 model=self._compressor_model,
             )
 
@@ -257,25 +271,25 @@ class ChannelObserverPlugin(Plugin):
 
         pipeline.py의 llm_call 시그니처에 맞춰
         async def(system_prompt, user_prompt) -> str 를 반환합니다.
-        observer와 동일한 OpenAI API 키를 사용하되,
+        소울스트림 프록시를 통해 호출하며,
         응답 생성에는 compressor_model(고성능 모델)을 사용합니다.
         """
-        import openai
-
-        client = openai.AsyncOpenAI(api_key=self._api_key)
+        soulstream = self._soulstream
         model = self._compressor_model
 
         async def llm_call(
             system_prompt: str, user_prompt: str
         ) -> str:
-            response = await client.chat.completions.create(
+            result = await soulstream.complete(
+                provider="openai",
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
+                client_id="channel-observer",
             )
-            return response.choices[0].message.content or ""
+            return result.content
 
         return llm_call
 

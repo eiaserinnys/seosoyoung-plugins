@@ -14,6 +14,7 @@ from typing import Any
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung.plugin_sdk import slack
 
+from seosoyoung_plugins.soulstream_client import SoulstreamSyncClient
 from seosoyoung_plugins.translate.detector import detect_language, Language
 from seosoyoung_plugins.translate.translator import translate
 from seosoyoung_plugins.translate.glossary import GlossaryMatchResult
@@ -38,13 +39,16 @@ class TranslatePlugin(Plugin):
         self._backend: str = config["backend"]
         self._model: str = config["model"]
         self._openai_model: str = config["openai_model"]
-        self._api_key: str = config["api_key"]
-        self._openai_api_key: str = config["openai_api_key"]
         self._context_count: int = config["context_count"]
         self._show_glossary: bool = config["show_glossary"]
         self._show_cost: bool = config["show_cost"]
         self._debug_channel: str = config["debug_channel"]
         self._glossary_path: str = config["glossary_path"]
+
+        self._soulstream = SoulstreamSyncClient(
+            base_url=config["soulstream_url"],
+            bearer_token=config["soulstream_token"],
+        )
 
         logger.info(
             "TranslatePlugin loaded: channels=%s, backend=%s",
@@ -53,7 +57,7 @@ class TranslatePlugin(Plugin):
         )
 
     async def on_unload(self) -> None:
-        pass
+        self._soulstream.close()
 
     def register_hooks(self) -> dict:
         async def on_message(ctx: HookContext) -> tuple[HookResult, Any]:
@@ -87,17 +91,16 @@ class TranslatePlugin(Plugin):
         """
         source_lang = detect_language(text)
 
-        if self._backend == "openai":
-            model, api_key = self._openai_model, self._openai_api_key
-        else:
-            model, api_key = self._model, self._api_key
+        model = (
+            self._openai_model if self._backend == "openai" else self._model
+        )
 
         translated, cost, glossary_terms, _ = translate(
             text,
             source_lang,
             backend=self._backend,
             model=model,
-            api_key=api_key,
+            soulstream_client=self._soulstream,
             glossary_path=self._glossary_path,
         )
         return translated, cost, glossary_terms, source_lang
@@ -284,13 +287,12 @@ class TranslatePlugin(Plugin):
                 channel, thread_ts, self._context_count
             )
 
-            # 백엔드별 모델/키 선택
-            if self._backend == "openai":
-                model = self._openai_model
-                api_key = self._openai_api_key
-            else:
-                model = self._model
-                api_key = self._api_key
+            # 백엔드별 모델 선택
+            model = (
+                self._openai_model
+                if self._backend == "openai"
+                else self._model
+            )
 
             # 번역
             translated, cost, glossary_terms, match_result = translate(
@@ -298,7 +300,7 @@ class TranslatePlugin(Plugin):
                 source_lang,
                 backend=self._backend,
                 model=model,
-                api_key=api_key,
+                soulstream_client=self._soulstream,
                 glossary_path=self._glossary_path,
                 context_messages=context_messages,
             )
