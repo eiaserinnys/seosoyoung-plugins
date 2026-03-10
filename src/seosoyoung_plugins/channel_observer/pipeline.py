@@ -773,48 +773,44 @@ async def _execute_intervene(
     trigger_message = None
     recent_messages = []
 
+    # judged + pending을 합쳐서 최근 컨텍스트 풀 확보
+    # 파이프라인이 pending → judged를 원자적으로 이동(snapshot)하므로 중복 없음
+    judged_messages = store.load_judged(channel_id)
+    all_context = judged_messages + pending_messages
+
     if target_ts and target_ts != "channel":
-        # pending에서 먼저 검색
-        for i, msg in enumerate(pending_messages):
+        # all_context에서 트리거 검색 + 직전 N개 슬라이싱
+        for i, msg in enumerate(all_context):
             if msg.get("ts") == target_ts:
                 trigger_message = msg
                 start = max(0, i - recent_messages_count)
-                recent_messages = pending_messages[start:i]
+                recent_messages = all_context[start:i]
                 break
 
-        # Bug C: pending에 없으면 thread_buffers에서 검색
+        # all_context에 없으면 thread_buffers에서 검색
         if trigger_message is None and thread_buffers:
             for thread_msgs in thread_buffers.values():
                 for msg in thread_msgs:
                     if msg.get("ts") == target_ts:
                         trigger_message = msg
-                        recent_messages = pending_messages[-recent_messages_count:]
+                        recent_messages = all_context[-recent_messages_count:]
                         break
                 if trigger_message is not None:
                     break
 
-        # Bug C: thread_buffers에도 없으면 judged에서 검색
-        if trigger_message is None:
-            judged_messages = store.load_judged(channel_id)
-            for msg in judged_messages:
-                if msg.get("ts") == target_ts:
-                    trigger_message = msg
-                    recent_messages = pending_messages[-recent_messages_count:]
-                    break
-
-        # Bug C: 어디에서도 못 찾으면 intervention 스킵 (엉뚱한 메시지 폴백 방지)
+        # 어디에서도 못 찾으면 intervention 스킵
         if trigger_message is None:
             logger.warning(
                 f"intervene 스킵: target_ts={target_ts}를 "
-                f"pending/thread_buffers/judged 어디에서도 찾을 수 없음 ({channel_id})"
+                f"all_context/thread_buffers 어디에서도 찾을 수 없음 ({channel_id})"
             )
-            _remove_thinking_reaction(channel_id, reaction_ts)
+            await _remove_thinking_reaction(channel_id, reaction_ts)
             return
 
-    if trigger_message is None and pending_messages:
+    if trigger_message is None and all_context:
         # target이 "channel"인 경우에만 여기에 도달
-        trigger_message = pending_messages[-1]
-        recent_messages = pending_messages[-(recent_messages_count + 1):-1]
+        trigger_message = all_context[-1]
+        recent_messages = all_context[-(recent_messages_count + 1):-1]
 
     # 3. 프롬프트 구성
     system_prompt = get_channel_intervene_system_prompt()
@@ -847,7 +843,7 @@ async def _execute_intervene(
             response_text = result.output
         else:
             logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")
-            _remove_thinking_reaction(channel_id, reaction_ts)
+            await _remove_thinking_reaction(channel_id, reaction_ts)
             return
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")

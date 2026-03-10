@@ -8,6 +8,8 @@ from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
     build_channel_intervene_user_prompt,
     _format_channel_messages,
+    _format_extra_content,
+    _format_files,
     _format_pending_messages,
     _format_thread_messages,
 )
@@ -297,3 +299,107 @@ class TestIntervenePromptWithThreadBuffers:
         )
         assert "다이제스트" in result
         assert "트리거" in result
+
+
+class TestFormatFilesEnhanced:
+    """_format_files 개선 테스트: filetype + url_private"""
+
+    def test_filetype_shown(self):
+        """filetype이 표시됨"""
+        files = [{"name": "screenshot.png", "filetype": "png"}]
+        result = _format_files(files)
+        assert "screenshot.png (png)" in result
+
+    def test_url_private_shown(self):
+        """url_private이 표시됨"""
+        files = [{"name": "photo.jpg", "filetype": "jpg", "url_private": "https://files.slack.com/photo.jpg"}]
+        result = _format_files(files)
+        assert "<https://files.slack.com/photo.jpg>" in result
+        assert "photo.jpg (jpg)" in result
+
+    def test_no_filetype_no_url(self):
+        """filetype/url_private 없으면 이름만 표시"""
+        files = [{"name": "mystery"}]
+        result = _format_files(files)
+        assert "mystery" in result
+        assert "(" not in result
+        assert "<" not in result
+
+    def test_multiple_files_with_mixed_info(self):
+        """다양한 파일 정보 혼합"""
+        files = [
+            {"name": "a.png", "filetype": "png", "url_private": "https://example.com/a.png"},
+            {"name": "b.txt", "filetype": "txt"},
+        ]
+        result = _format_files(files)
+        assert "a.png (png) <https://example.com/a.png>" in result
+        assert "b.txt (txt)" in result
+
+
+class TestFormatExtraContent:
+    """_format_extra_content 테스트"""
+
+    def test_blocks_text_shown(self):
+        """blocks_text가 있으면 [blocks: ...] 형식으로 표시"""
+        msg = {"ts": "1.1", "user": "U001", "text": "hello", "blocks_text": "추가 블록 내용"}
+        result = _format_extra_content(msg)
+        assert "[blocks: 추가 블록 내용]" in result
+
+    def test_attachments_text_shown(self):
+        """attachments_text가 있으면 [📌 ...] 형식으로 표시"""
+        msg = {"ts": "1.1", "user": "U001", "text": "link", "attachments_text": "Article Title"}
+        result = _format_extra_content(msg)
+        assert "[📌 Article Title]" in result
+
+    def test_both_blocks_and_attachments(self):
+        """blocks_text와 attachments_text 둘 다 있는 경우"""
+        msg = {"blocks_text": "블록 내용", "attachments_text": "첨부 내용"}
+        result = _format_extra_content(msg)
+        assert "[blocks: 블록 내용]" in result
+        assert "[📌 첨부 내용]" in result
+
+    def test_no_extra_content(self):
+        """extra content 없으면 빈 문자열"""
+        msg = {"ts": "1.1", "user": "U001", "text": "hello"}
+        result = _format_extra_content(msg)
+        assert result == ""
+
+
+class TestFormatMessagesWithExtraContent:
+    """포맷 함수에 extra_content 적용 테스트"""
+
+    def test_channel_messages_with_blocks_text(self):
+        """채널 메시지에 blocks_text 표시"""
+        msgs = [{"ts": "1.1", "user": "U001", "text": "hello", "blocks_text": "추가 내용"}]
+        result = _format_channel_messages(msgs)
+        assert "[blocks: 추가 내용]" in result
+
+    def test_channel_messages_with_attachments_text(self):
+        """채널 메시지에 attachments_text 표시"""
+        msgs = [{"ts": "1.1", "user": "U001", "text": "link", "attachments_text": "[Title](http://ex.com)"}]
+        result = _format_channel_messages(msgs)
+        assert "[📌 [Title](http://ex.com)]" in result
+
+    def test_pending_messages_with_extra_content(self):
+        """pending 메시지에 extra_content 표시"""
+        msgs = [{"ts": "1.1", "user": "U001", "text": "msg", "blocks_text": "블록"}]
+        result = _format_pending_messages(msgs)
+        assert "[blocks: 블록]" in result
+
+    def test_thread_messages_with_extra_content(self):
+        """스레드 메시지에 extra_content 표시"""
+        buffers = {
+            "parent.ts": [{"ts": "2.1", "user": "U001", "text": "reply", "attachments_text": "첨부"}],
+        }
+        result = _format_thread_messages(buffers)
+        assert "[📌 첨부]" in result
+
+    def test_channel_messages_with_filetype_and_url(self):
+        """채널 메시지에 filetype과 url_private 표시"""
+        msgs = [{
+            "ts": "1.1", "user": "U001", "text": "사진",
+            "files": [{"name": "photo.jpg", "filetype": "jpg", "url_private": "https://files.slack.com/photo.jpg"}],
+        }]
+        result = _format_channel_messages(msgs)
+        assert "photo.jpg (jpg)" in result
+        assert "<https://files.slack.com/photo.jpg>" in result

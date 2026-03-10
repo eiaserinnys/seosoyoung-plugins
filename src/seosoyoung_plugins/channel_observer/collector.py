@@ -27,6 +27,49 @@ class ChannelMessageCollector:
         "pinned_item", "unpinned_item",
     }
 
+    @staticmethod
+    def _extract_blocks_text(blocks: list[dict]) -> str:
+        """blocks 필드에서 읽을 수 있는 텍스트를 추출.
+
+        rich_text는 이미 text 필드에 반영되므로 스킵.
+        """
+        parts: list[str] = []
+        for block in blocks:
+            btype = block.get("type", "")
+            if btype in ("section", "header"):
+                text_obj = block.get("text")
+                if text_obj and text_obj.get("text"):
+                    parts.append(text_obj["text"])
+            elif btype == "image":
+                alt = block.get("alt_text", "")
+                title = (block.get("title") or {}).get("text", "")
+                url = block.get("image_url", "")
+                desc = title or alt or "image"
+                parts.append(f"[image: {desc}]" + (f" ({url})" if url else ""))
+            elif btype == "context":
+                for elem in block.get("elements", []):
+                    if elem.get("type") in ("mrkdwn", "plain_text") and elem.get("text"):
+                        parts.append(elem["text"])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _extract_attachments_text(attachments: list[dict]) -> str:
+        """attachments 필드에서 텍스트를 추출 (URL unfurl, 봇 첨부 등)."""
+        parts: list[str] = []
+        for att in attachments:
+            title = att.get("title", "")
+            text = att.get("text", "")
+            fallback = att.get("fallback", "")
+            pretext = att.get("pretext", "")
+            title_link = att.get("title_link", "")
+            content = title or text or fallback or pretext
+            if content:
+                if title_link:
+                    parts.append(f"[{content}]({title_link})")
+                else:
+                    parts.append(content)
+        return "\n".join(parts)
+
     def __init__(
         self,
         store: ChannelStore,
@@ -98,8 +141,20 @@ class ChannelMessageCollector:
         user = source.get("user", "")
         files = source.get("files") or event.get("files")
 
-        # text와 user 모두 비어있고 파일도 없으면 수집하지 않음
-        if not text and not user and not files:
+        # blocks/attachments에서 보충 텍스트 추출
+        blocks = source.get("blocks") or event.get("blocks")
+        attachments = source.get("attachments") or event.get("attachments")
+
+        blocks_text = self._extract_blocks_text(blocks) if blocks else ""
+        attachments_text = self._extract_attachments_text(attachments) if attachments else ""
+
+        # text가 비어있으면 blocks_text로 보충
+        if not text and blocks_text:
+            text = blocks_text
+            blocks_text = ""  # text에 반영했으므로 별도 저장 불필요
+
+        # text/user/files/blocks_text/attachments_text 모두 비어있으면 수집하지 않음
+        if not text and not user and not files and not blocks_text and not attachments_text:
             return False
 
         ts = source.get("ts", "") or event.get("ts", "")
@@ -116,10 +171,18 @@ class ChannelMessageCollector:
         if bot_id:
             msg["bot_id"] = bot_id
         if files:
-            msg["files"] = [
-                {"name": f.get("name", ""), "filetype": f.get("filetype", "")}
-                for f in files
-            ]
+            file_entries = []
+            for f in files:
+                entry: dict = {"name": f.get("name", ""), "filetype": f.get("filetype", "")}
+                url_private = f.get("url_private", "")
+                if url_private:
+                    entry["url_private"] = url_private
+                file_entries.append(entry)
+            msg["files"] = file_entries
+        if blocks_text:
+            msg["blocks_text"] = blocks_text
+        if attachments_text:
+            msg["attachments_text"] = attachments_text
 
         # message_changed(unfurl 등)는 기존 메시지를 교체(upsert)하여 중복 방지
         is_update = subtype == "message_changed"
