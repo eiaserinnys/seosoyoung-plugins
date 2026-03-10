@@ -581,3 +581,191 @@ class TestUnfurlDedup:
         assert messages[0]["text"] == "메시지 A"
         assert messages[1]["text"] == "https://example.com"
         assert messages[2]["text"] == "메시지 C"
+
+
+class TestBlockKitCollection:
+    """Block Kit 콘텐츠 수집 테스트"""
+
+    def test_collect_section_block_fills_empty_text(self, collector, store):
+        """text 비어있을 때 section 블록에서 텍스트 보충"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "UBOT",
+            "text": "", "bot_id": "B001",
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "봇 알림 내용"}}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert len(msgs) == 1
+        assert msgs[0]["text"] == "봇 알림 내용"
+        # text로 보충됐으므로 blocks_text 별도 저장 없음
+        assert "blocks_text" not in msgs[0]
+
+    def test_collect_header_block_fills_empty_text(self, collector, store):
+        """text 비어있을 때 header 블록에서 텍스트 보충"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "UBOT",
+            "text": "", "bot_id": "B001",
+            "blocks": [{"type": "header", "text": {"type": "plain_text", "text": "공지사항"}}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["text"] == "공지사항"
+
+    def test_collect_image_block(self, collector, store):
+        """image 블록에서 alt_text와 URL 추출"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "UBOT",
+            "text": "", "bot_id": "B001",
+            "blocks": [{"type": "image", "alt_text": "차트 이미지", "image_url": "https://example.com/chart.png"}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert "[image: 차트 이미지]" in msgs[0]["text"]
+        assert "https://example.com/chart.png" in msgs[0]["text"]
+
+    def test_collect_context_block(self, collector, store):
+        """context 블록에서 텍스트 추출"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "UBOT",
+            "text": "", "bot_id": "B001",
+            "blocks": [{"type": "context", "elements": [
+                {"type": "mrkdwn", "text": "업데이트 시간: 10:30"},
+            ]}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert "업데이트 시간: 10:30" in msgs[0]["text"]
+
+    def test_blocks_text_separate_when_text_exists(self, collector, store):
+        """text가 있을 때 blocks_text는 별도 필드로 저장"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "원래 텍스트",
+            "blocks": [
+                {"type": "rich_text", "elements": []},  # rich_text는 스킵
+                {"type": "section", "text": {"type": "mrkdwn", "text": "추가 블록 내용"}},
+            ],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["text"] == "원래 텍스트"
+        assert msgs[0]["blocks_text"] == "추가 블록 내용"
+
+    def test_collect_attachments_unfurl(self, collector, store):
+        """URL unfurl attachment에서 title/title_link 추출"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "https://example.com",
+            "attachments": [
+                {"title": "Example Site", "title_link": "https://example.com", "text": "Site description"},
+            ],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0].get("attachments_text")
+        assert "[Example Site](https://example.com)" in msgs[0]["attachments_text"]
+
+    def test_collect_attachments_without_title_link(self, collector, store):
+        """title_link 없는 attachment는 content만 표시"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "봇 메시지",
+            "attachments": [{"text": "알림 내용입니다"}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["attachments_text"] == "알림 내용입니다"
+
+    def test_collect_attachments_fallback(self, collector, store):
+        """title/text 없으면 fallback 사용"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "링크",
+            "attachments": [{"fallback": "Fallback text"}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["attachments_text"] == "Fallback text"
+
+    def test_empty_blocks_and_attachments_no_extra_fields(self, collector, store):
+        """blocks/attachments가 비어있으면 blocks_text/attachments_text 필드 없음"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "일반 메시지",
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert "blocks_text" not in msgs[0]
+        assert "attachments_text" not in msgs[0]
+
+    def test_blocks_only_message_not_skipped(self, collector, store):
+        """text/user 비어있어도 blocks에서 텍스트를 추출하면 수집"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1",
+            "text": "", "user": "",
+            "subtype": "bot_message", "bot_id": "B001",
+            "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": "봇 알림"}}],
+        }
+        result = collector.collect(event)
+        assert result is True
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["text"] == "봇 알림"
+
+    def test_message_changed_with_attachments(self, collector, store):
+        """message_changed unfurl로 attachments가 추가되는 경우"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1",
+            "subtype": "message_changed",
+            "message": {
+                "text": "https://example.com", "user": "U001", "ts": "1.1",
+                "attachments": [{"title": "Example Site", "title_link": "https://example.com"}],
+            },
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0].get("attachments_text")
+        assert "Example Site" in msgs[0]["attachments_text"]
+
+
+class TestUrlPrivateCollection:
+    """url_private 저장 테스트"""
+
+    def test_url_private_stored_when_present(self, collector, store):
+        """파일에 url_private이 있으면 저장"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "이미지입니다",
+            "files": [{
+                "name": "photo.jpg", "filetype": "jpg",
+                "url_private": "https://files.slack.com/files-pri/T001/photo.jpg",
+            }],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["files"][0]["url_private"] == "https://files.slack.com/files-pri/T001/photo.jpg"
+
+    def test_url_private_not_stored_when_absent(self, collector, store):
+        """파일에 url_private이 없으면 url_private 키 없음"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "",
+            "files": [{"name": "doc.pdf", "filetype": "pdf"}],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert "url_private" not in msgs[0]["files"][0]
+
+    def test_multiple_files_with_mixed_url_private(self, collector, store):
+        """여러 파일 중 일부만 url_private 있는 경우"""
+        event = {
+            "channel": "C_OBSERVE", "ts": "1.1", "user": "U001",
+            "text": "",
+            "files": [
+                {"name": "img.png", "filetype": "png", "url_private": "https://files.slack.com/img.png"},
+                {"name": "doc.txt", "filetype": "txt"},
+            ],
+        }
+        collector.collect(event)
+        msgs = store.load_channel_buffer("C_OBSERVE")
+        assert msgs[0]["files"][0]["url_private"] == "https://files.slack.com/img.png"
+        assert "url_private" not in msgs[0]["files"][1]

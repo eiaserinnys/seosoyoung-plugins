@@ -142,7 +142,8 @@ def build_channel_intervene_user_prompt(
         sender = resolver.resolve(user) if resolver else user
         text = trigger_message.get("text", "")
         files_str = _format_files(trigger_message.get("files", []))
-        trigger_text = f"[{ts}] {sender}: {text}{files_str}"
+        extra_str = _format_extra_content(trigger_message)
+        trigger_text = f"[{ts}] {sender}: {text}{files_str}{extra_str}"
     else:
         trigger_text = "(없음)"
 
@@ -238,11 +239,31 @@ def _format_reactions(reactions: list[dict]) -> str:
 
 
 def _format_files(files: list[dict]) -> str:
-    """files 리스트를 `[📎 name (type)]` 형식의 문자열로 변환"""
+    """files 리스트를 `[📎 name (type) <url>]` 형식의 문자열로 변환"""
     if not files:
         return ""
-    parts = [f"{f.get('name', 'file')}" for f in files]
+    parts = []
+    for f in files:
+        name = f.get("name", "file")
+        filetype = f.get("filetype", "")
+        url = f.get("url_private", "")
+        label = f"{name} ({filetype})" if filetype else name
+        if url:
+            label += f" <{url}>"
+        parts.append(label)
     return " [📎 " + ", ".join(parts) + "]"
+
+
+def _format_extra_content(msg: dict) -> str:
+    """blocks_text와 attachments_text를 포맷"""
+    parts = []
+    if msg.get("blocks_text"):
+        parts.append(f"[blocks: {msg['blocks_text']}]")
+    if msg.get("attachments_text"):
+        parts.append(f"[📌 {msg['attachments_text']}]")
+    if not parts:
+        return ""
+    return " " + " ".join(parts)
 
 
 def _format_pending_messages(
@@ -269,6 +290,7 @@ def _format_pending_messages(
         if mention_pattern and mention_pattern in text and not is_bot:
             tag = " [ALREADY REACTED]"
         files_str = _format_files(msg.get("files", []))
+        extra_str = _format_extra_content(msg)
         reactions_str = _format_reactions(msg.get("reactions", []))
         # 봇이 이미 리액션한 이모지 표시
         bot_reacted_str = ""
@@ -279,7 +301,7 @@ def _format_pending_messages(
             ]
             if bot_emojis:
                 bot_reacted_str = " [BOT REACTED: " + ", ".join(bot_emojis) + "]"
-        lines.append(f"[{ts}] {sender}: {text}{files_str}{tag}{bot_reacted_str}{reactions_str}")
+        lines.append(f"[{ts}] {sender}: {text}{files_str}{extra_str}{tag}{bot_reacted_str}{reactions_str}")
     return "\n".join(lines)
 
 
@@ -297,8 +319,9 @@ def _format_channel_messages(
         sender = resolver.resolve(user) if resolver else user
         text = msg.get("text", "")
         files_str = _format_files(msg.get("files", []))
+        extra_str = _format_extra_content(msg)
         reactions_str = _format_reactions(msg.get("reactions", []))
-        lines.append(f"[{ts}] {sender}: {text}{files_str}{reactions_str}")
+        lines.append(f"[{ts}] {sender}: {text}{files_str}{extra_str}{reactions_str}")
     return "\n".join(lines)
 
 
@@ -318,7 +341,8 @@ def _format_thread_messages(
             sender = resolver.resolve(user) if resolver else user
             text = msg.get("text", "")
             files_str = _format_files(msg.get("files", []))
+            extra_str = _format_extra_content(msg)
             reactions_str = _format_reactions(msg.get("reactions", []))
-            lines.append(f"  [{ts}] {sender}: {text}{files_str}{reactions_str}")
+            lines.append(f"  [{ts}] {sender}: {text}{files_str}{extra_str}{reactions_str}")
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

@@ -1528,3 +1528,90 @@ class TestPipelineBurstCooldown:
             if c[1].get("channel") == channel_id
         ]
         assert len(channel_calls) >= 1
+
+
+class TestInterveneRecentMessagesFromJudged:
+    """_execute_intervene의 recent_messages가 judged에서 보충되는지 검증"""
+
+    @pytest.mark.asyncio
+    async def test_trigger_at_pending_start_uses_judged(self, store, channel_id, mock_plugin_sdk):
+        """pending에 트리거 1개만 있을 때 judged에서 recent_messages 보충"""
+        # judged에 5개 메시지
+        _fill_judged(store, channel_id, n=5)
+
+        # pending에 트리거 1개만
+        trigger_ts = "9999.000"
+        store.append_pending(channel_id, {
+            "ts": trigger_ts, "user": "UTRIG", "text": "트리거 메시지",
+        })
+
+        observer = FakeObserver(judge_result=JudgeResult(
+            importance=8,
+            reaction_type="intervene",
+            reaction_target=trigger_ts,
+            reaction_content="개입 이유",
+        ))
+        history = InterventionHistory(base_dir=store.base_dir)
+        mock_llm = AsyncMock(return_value="응답 텍스트")
+
+        await run_channel_pipeline(
+            store=store,
+            observer=observer,
+            channel_id=channel_id,
+            cooldown=history,
+            threshold_a=1,
+            intervention_threshold=0.0,
+            llm_call=mock_llm,
+        )
+
+        # soulstream.run 호출된 프롬프트에 judged 메시지 텍스트가 포함
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
+        prompt = mock_plugin_sdk["soulstream"].run.call_args[1]["prompt"]
+        # judged 메시지의 텍스트가 recent_messages로 프롬프트에 포함되어야 함
+        assert "판단 완료 메시지 0번" in prompt
+        assert "판단 완료 메시지 4번" in prompt
+        # 트리거 메시지 자체도 포함
+        assert "트리거 메시지" in prompt
+
+    @pytest.mark.asyncio
+    async def test_combined_judged_pending_context(self, store, channel_id, mock_plugin_sdk):
+        """judged 5개 + pending 3개, 트리거가 pending 마지막일 때 모두 recent에 포함"""
+        _fill_judged(store, channel_id, n=5)
+
+        # pending에 3개 (트리거는 마지막)
+        for i in range(3):
+            store.append_pending(channel_id, {
+                "ts": f"300{i}.000", "user": f"UP{i}", "text": f"pending 메시지 {i}번",
+            })
+
+        trigger_ts = "3002.000"  # pending의 마지막 메시지
+        observer = FakeObserver(judge_result=JudgeResult(
+            importance=8,
+            reaction_type="intervene",
+            reaction_target=trigger_ts,
+            reaction_content="개입 이유",
+        ))
+        history = InterventionHistory(base_dir=store.base_dir)
+        mock_llm = AsyncMock(return_value="응답 텍스트")
+
+        await run_channel_pipeline(
+            store=store,
+            observer=observer,
+            channel_id=channel_id,
+            cooldown=history,
+            threshold_a=1,
+            intervention_threshold=0.0,
+            llm_call=mock_llm,
+        )
+
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
+        prompt = mock_plugin_sdk["soulstream"].run.call_args[1]["prompt"]
+        # recent_messages_count=5 (기본값)이므로 트리거 직전 5개:
+        # all_context = [judged_0..4, pending_0..2], 트리거=pending_2(index 7)
+        # recent = all_context[2:7] = [judged_2, judged_3, judged_4, pending_0, pending_1]
+        assert "판단 완료 메시지 2번" in prompt
+        assert "판단 완료 메시지 4번" in prompt
+        assert "pending 메시지 0번" in prompt
+        assert "pending 메시지 1번" in prompt
+        # judged_0, judged_1은 윈도우 밖 → 포함되지 않음
+        assert "판단 완료 메시지 0번" not in prompt
