@@ -19,6 +19,11 @@ from seosoyoung.plugin_sdk import slack, soulstream
 from seosoyoung_plugins.trello.client import TrelloClient, TrelloCard
 from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
+# Module-level alias for threading.Thread.
+# Tests patch this alias (seosoyoung_plugins.trello.watcher._Thread)
+# instead of threading.Thread globally, so AsyncRunner is unaffected.
+_Thread = threading.Thread
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,7 +136,8 @@ class TrelloWatcher:
         self._stop_event = threading.Event()
         self._paused = False
         self._pause_lock = threading.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        from seosoyoung_plugins.utils.async_runner import AsyncRunner
+        self._async_runner = AsyncRunner()
 
         # 리스트 정주행 직렬화 락
         self._list_run_lock = threading.Lock()
@@ -319,8 +325,7 @@ class TrelloWatcher:
         새 카드가 감지되면 burst_interval 간격으로 최대 max_burst_count회 재폴링한다.
         연속으로 새 카드가 없으면 기존 간격으로 복귀한다.
         """
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+        self._async_runner.start()
 
         burst_remaining = 0
 
@@ -354,7 +359,7 @@ class TrelloWatcher:
 
                 self._stop_event.wait(timeout=wait_time)
         finally:
-            self._loop.close()
+            self._async_runner.stop()
 
     def _poll(self) -> bool:
         """리스트 폴링
@@ -436,7 +441,7 @@ class TrelloWatcher:
                     logger.info(f"카드 이동 완료: {card.name}")
                     try:
                         channel = self._get_dm_or_notify_channel()
-                        self._loop.run_until_complete(
+                        self._async_runner.run(
                             slack.send_message(
                                 channel=channel,
                                 text=f"✅ <{card.url}|*{card.name}*>"
@@ -486,7 +491,7 @@ class TrelloWatcher:
     def _get_dm_or_notify_channel(self) -> str:
         if self.dm_target_user_id:
             try:
-                dm_channel_id = self._loop.run_until_complete(
+                dm_channel_id = self._async_runner.run(
                     slack.open_dm(self.dm_target_user_id)
                 )
                 if dm_channel_id:
@@ -499,14 +504,14 @@ class TrelloWatcher:
         if not self.dm_target_user_id:
             return None, None
         try:
-            dm_channel_id = self._loop.run_until_complete(
+            dm_channel_id = self._async_runner.run(
                 slack.open_dm(self.dm_target_user_id)
             )
             if not dm_channel_id:
                 return None, None
 
             anchor_text = f"🎫 *<{card_url}|{card_name}>*\n`사고 과정을 기록합니다...`"
-            result = self._loop.run_until_complete(
+            result = self._async_runner.run(
                 slack.send_message(
                     channel=dm_channel_id,
                     text=anchor_text,
@@ -571,7 +576,7 @@ class TrelloWatcher:
             header = self._build_header(card.name, card.url)
             initial_text = f"{header}\n\n`소영이 생각합니다...`"
             try:
-                result = self._loop.run_until_complete(
+                result = self._async_runner.run(
                     slack.send_message(
                         channel=self.notify_channel,
                         text=initial_text
@@ -586,7 +591,7 @@ class TrelloWatcher:
                 logger.info(f"알림 전송 완료 (폴백): thread_ts={thread_ts}")
                 reaction = "arrow_forward" if has_execute else "thought_balloon"
                 try:
-                    self._loop.run_until_complete(
+                    self._async_runner.run(
                         slack.add_reaction(
                             channel=self.notify_channel,
                             ts=thread_ts,
@@ -695,7 +700,7 @@ class TrelloWatcher:
                         logger.exception(f"on_start 콜백 오류: {e}")
 
                 # Run Claude using plugin_sdk
-                result = self._loop.run_until_complete(
+                result = self._async_runner.run(
                     soulstream.run(
                         prompt=prompt,
                         channel=channel,
@@ -736,7 +741,7 @@ class TrelloWatcher:
                 except Exception as e:
                     logger.exception(f"on_success 콜백 오류: {e}")
 
-        claude_thread = threading.Thread(target=run_claude, daemon=True)
+        claude_thread = _Thread(target=run_claude, daemon=True)
         claude_thread.start()
 
     # -- 리스트 정주행 --
@@ -804,7 +809,7 @@ class TrelloWatcher:
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 future = pool.submit(
-                    self._loop.run_until_complete,
+                    self._async_runner.run,
                     soulstream.compact(session_id)
                 )
                 try:
@@ -832,10 +837,10 @@ class TrelloWatcher:
     ):
         """리스트 정주행 시작
 
-        세션을 RUNNING 상태로 즉시 생성한 후, 트리거 카드에서
-        🏃 Run List 레이블을 제거합니다. 이 순서를 통해:
-        1. 세션 생성 실패 시 레이블이 유지되어 다음 폴링에서 재감지
-        2. 세션이 RUNNING으로 즉시 등록되어 get_active_sessions()에 반영
+        Slack 알림을 먼저 전송하고, 성공한 경우에만 세션을 생성한다.
+        이 순서를 통해:
+        1. 알림 실패 시 세션이 생성되지 않으므로 고아 세션이 발생하지 않음
+        2. 레이블이 유지되어 다음 폴링에서 재감지 가능
 
         Args:
             list_id: 트렐로 리스트 ID
@@ -851,22 +856,7 @@ class TrelloWatcher:
             logger.warning("ListRunner가 설정되지 않아 정주행을 시작할 수 없습니다.")
             return
 
-        card_ids = [card.id for card in cards]
-        session = list_runner.create_session(
-            list_id=list_id, list_name=list_name, card_ids=card_ids,
-        )
-
-        # 세션 생성 성공 후 레이블 제거 (실패해도 정주행은 계속 진행)
-        if trigger_card:
-            label_id = self._get_run_list_label_id(trigger_card)
-            if label_id:
-                if self.trello.remove_label_from_card(trigger_card.id, label_id):
-                    logger.info(f"🏃 Run List 레이블 제거: {trigger_card.name}")
-                else:
-                    logger.warning(
-                        f"레이블 제거 실패 (정주행은 계속 진행): {trigger_card.name}"
-                    )
-
+        # 1. Slack 알림 → 실패 시 return (세션 미생성, 레이블 유지)
         dm_channel_id, dm_thread_ts = self._open_dm_thread(f"📋 {list_name} 정주행", "")
 
         if dm_channel_id and dm_thread_ts:
@@ -878,14 +868,13 @@ class TrelloWatcher:
                 card_preview = "\n".join([f"  • {c.name}" for c in cards[:5]])
                 if len(cards) > 5:
                     card_preview += f"\n  ... 외 {len(cards) - 5}개"
-                result = self._loop.run_until_complete(
+                result = self._async_runner.run(
                     slack.send_message(
                         channel=self.notify_channel,
                         text=(
                             f"🚀 *리스트 정주행 시작*\n"
                             f"📋 리스트: *{list_name}*\n"
-                            f"🎫 카드 수: {len(cards)}개\n"
-                            f"🔖 세션 ID: `{session.session_id}`\n\n"
+                            f"🎫 카드 수: {len(cards)}개\n\n"
                             f"*처리할 카드:*\n{card_preview}"
                         )
                     )
@@ -898,6 +887,24 @@ class TrelloWatcher:
                 logger.error(f"정주행 시작 알림 전송 실패: {e}")
                 return
 
+        # 2. 세션 생성 RUNNING
+        card_ids = [card.id for card in cards]
+        session = list_runner.create_session(
+            list_id=list_id, list_name=list_name, card_ids=card_ids,
+        )
+
+        # 3. 레이블 제거 (실패해도 정주행은 계속 진행)
+        if trigger_card:
+            label_id = self._get_run_list_label_id(trigger_card)
+            if label_id:
+                if self.trello.remove_label_from_card(trigger_card.id, label_id):
+                    logger.info(f"🏃 Run List 레이블 제거: {trigger_card.name}")
+                else:
+                    logger.warning(
+                        f"레이블 제거 실패 (정주행은 계속 진행): {trigger_card.name}"
+                    )
+
+        # 4. 첫 카드 처리 시작
         self._process_list_run_card(session.session_id, run_thread_ts, run_channel)
 
     def _process_list_run_card(self, session_id: str, thread_ts: str, run_channel: str = None):
@@ -920,7 +927,7 @@ class TrelloWatcher:
             except Exception:
                 pass
             try:
-                self._loop.run_until_complete(
+                self._async_runner.run(
                     slack.send_message(
                         channel=channel,
                         thread_ts=thread_ts,
@@ -945,7 +952,7 @@ class TrelloWatcher:
         next_card_id = list_runner.get_next_card_id(session_id)
         if not next_card_id:
             list_runner.update_session_status(session_id, SessionStatus.COMPLETED)
-            self._loop.run_until_complete(
+            self._async_runner.run(
                 slack.send_message(
                     channel=channel,
                     thread_ts=thread_ts,
@@ -984,7 +991,7 @@ class TrelloWatcher:
         self._add_spinner_prefix(card)
 
         progress = f"{session.current_index + 1}/{len(session.card_ids)}"
-        self._loop.run_until_complete(
+        self._async_runner.run(
             slack.send_message(
                 channel=channel,
                 thread_ts=thread_ts,
@@ -1020,7 +1027,7 @@ class TrelloWatcher:
                 self._preemptive_compact(thread_ts, channel, card.name)
             except Exception as compact_err:
                 logger.warning(f"선제적 컴팩트 실패: card={card.name}, error={compact_err}")
-            next_thread = threading.Thread(
+            next_thread = _Thread(
                 target=self._process_list_run_card,
                 args=(session_id, thread_ts, run_channel), daemon=True
             )
@@ -1032,7 +1039,7 @@ class TrelloWatcher:
             self._remove_spinner_prefix(card.id, f"🌀 {card.name}")
             self._untrack_card(card.id)
             logger.error(f"정주행 카드 실패: card={card.name}, session={session_id}")
-            self._loop.run_until_complete(
+            self._async_runner.run(
                 slack.send_message(
                     channel=channel,
                     thread_ts=thread_ts,
