@@ -308,15 +308,27 @@ class ListRunner:
                 created = datetime.fromisoformat(session.created_at)
                 elapsed_hours = (now - created).total_seconds() / 3600
                 if elapsed_hours > self.ZOMBIE_SESSION_HOURS:
-                    logger.warning(
-                        f"좀비 세션 자동 일시중단: {session.session_id} "
-                        f"({session.list_name}, {elapsed_hours:.1f}시간 경과, "
-                        f"{session.current_index}/{len(session.card_ids)} 처리됨)"
-                    )
-                    session.status = SessionStatus.PAUSED
-                    session.error_message = (
-                        f"좀비 세션 자동 정리: {elapsed_hours:.1f}시간 경과"
-                    )
+                    # 시작도 못 한 세션 → FAILED (재실행 차단 안 함)
+                    if session.current_index == 0 and not session.processed_cards:
+                        logger.warning(
+                            f"좀비 세션 자동 실패: {session.session_id} "
+                            f"({session.list_name}, {elapsed_hours:.1f}시간 경과, 진행 없음)"
+                        )
+                        session.status = SessionStatus.FAILED
+                        session.error_message = (
+                            f"좀비 세션 자동 정리: {elapsed_hours:.1f}시간 경과 (진행 없음)"
+                        )
+                    else:
+                        # 진행 중이던 세션 → PAUSED (재개 가능)
+                        logger.warning(
+                            f"좀비 세션 자동 일시중단: {session.session_id} "
+                            f"({session.list_name}, {elapsed_hours:.1f}시간 경과, "
+                            f"{session.current_index}/{len(session.card_ids)} 처리됨)"
+                        )
+                        session.status = SessionStatus.PAUSED
+                        session.error_message = (
+                            f"좀비 세션 자동 정리: {elapsed_hours:.1f}시간 경과"
+                        )
                     changed = True
             except (ValueError, TypeError):
                 pass

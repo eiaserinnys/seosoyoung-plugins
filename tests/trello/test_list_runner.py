@@ -56,12 +56,8 @@ def _make_watcher(tmp_path, **overrides):
         list_runner_ref=list_runner_ref,
     )
 
-    # Set event loop for tests (normally set in _run() when thread starts)
-    try:
-        watcher._loop = asyncio.get_event_loop()
-    except RuntimeError:
-        watcher._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(watcher._loop)
+    # Start AsyncRunner for tests (normally started in _run() when thread starts)
+    watcher._async_runner.start()
 
     return watcher
 
@@ -1681,8 +1677,8 @@ class TestZombieSessionCleanup:
             assert len(active) == 0
             assert runner.get_session(session.session_id).status == SessionStatus.COMPLETED
 
-    def test_zombie_session_old_running(self):
-        """오래된 running 세션 → paused로 자동 전이"""
+    def test_zombie_session_old_running_with_progress(self):
+        """진행 중이던 오래된 running 세션 → paused로 자동 전이"""
         from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
         from datetime import timedelta
 
@@ -1695,6 +1691,8 @@ class TestZombieSessionCleanup:
                 card_ids=["card1", "card2"],
             )
             runner.update_session_status(session.session_id, SessionStatus.RUNNING)
+            # 진행 이력이 있는 세션 (1개 카드 처리됨)
+            runner.mark_card_processed(session.session_id, "card1", "completed")
 
             # 생성 시각을 3시간 전으로 조작
             old_time = (datetime.now() - timedelta(hours=3)).isoformat()
@@ -1704,9 +1702,37 @@ class TestZombieSessionCleanup:
             # get_active_sessions 호출 시 좀비 정리 발동
             active = runner.get_active_sessions()
 
-            # 오래된 세션이 PAUSED로 전이
-            assert len(active) == 1  # PAUSED도 active에 포함됨
+            # 진행 중이던 세션 → PAUSED (재개 가능, active에 포함됨)
+            assert len(active) == 1
             assert runner.get_session(session.session_id).status == SessionStatus.PAUSED
+
+    def test_zombie_session_no_progress_becomes_failed(self):
+        """시작도 못 한 오래된 running 세션 → failed로 자동 전이"""
+        from seosoyoung_plugins.trello.list_runner import ListRunner, SessionStatus
+        from datetime import timedelta
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = ListRunner(data_dir=Path(tmpdir))
+
+            session = runner.create_session(
+                list_id="list_123",
+                list_name="📦 Backlog",
+                card_ids=["card1", "card2"],
+            )
+            runner.update_session_status(session.session_id, SessionStatus.RUNNING)
+            # current_index=0, processed_cards={} → 시작도 못 한 세션
+
+            # 생성 시각을 3시간 전으로 조작
+            old_time = (datetime.now() - timedelta(hours=3)).isoformat()
+            session.created_at = old_time
+            runner.save_sessions()
+
+            # get_active_sessions 호출 시 좀비 정리 발동
+            active = runner.get_active_sessions()
+
+            # 시작도 못 한 세션 → FAILED (active에 포함 안 됨)
+            assert len(active) == 0
+            assert runner.get_session(session.session_id).status == SessionStatus.FAILED
 
     def test_zombie_cleanup_does_not_affect_normal_sessions(self):
         """정상 running 세션은 영향 없음"""

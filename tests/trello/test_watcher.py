@@ -56,12 +56,8 @@ def _make_watcher(tmp_path, **overrides):
         list_runner_ref=list_runner_ref,
     )
 
-    # Set event loop for tests (normally set in _run() when thread starts)
-    try:
-        watcher._loop = asyncio.get_event_loop()
-    except RuntimeError:
-        watcher._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(watcher._loop)
+    # Start AsyncRunner for tests (normally started in _run() when thread starts)
+    watcher._async_runner.start()
 
     return watcher
 
@@ -887,7 +883,7 @@ class TestMultiCardChainingIntegration:
     on_success 내부의 threading.Thread도 동기화하여 전체 체인을 검증합니다.
     """
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_three_card_chaining_completes(self, tmp_path, mock_plugin_sdk):
         """3장의 카드가 순차적으로 처리되고 세션이 COMPLETED 상태가 됨"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -948,7 +944,7 @@ class TestMultiCardChainingIntegration:
             "card_c": "completed",
         }
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_chaining_continues_after_compact_failure(self, tmp_path, mock_plugin_sdk):
         """_preemptive_compact 실패해도 체인이 끊기지 않음"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -1246,7 +1242,7 @@ class TestListRunOnSuccessLockOrder:
     - on_success 내부의 새 스레드가 같은 락 획득 시도 → 블로킹
     """
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_lock_state_after_on_success_with_real_lock(self, tmp_path, mock_plugin_sdk):
         """실제 락과 _spawn_claude_thread를 사용할 때 on_success 시 락이 해제되어 있어야 함
 
@@ -1518,13 +1514,10 @@ class TestAdaptivePolling:
             return True
 
         watcher._stop_event.wait = recording_wait
-        watcher._loop = asyncio.new_event_loop()
+        # _run() calls _async_runner.start() internally, so stop the one from _make_watcher
+        watcher._async_runner.stop()
 
-        try:
-            watcher._run()
-        finally:
-            if watcher._loop and not watcher._loop.is_closed():
-                watcher._loop.close()
+        watcher._run()
 
         # 첫 폴링에서 새 카드 발견 → burst_interval(2초)로 대기
         assert len(wait_times) >= 1
@@ -1551,13 +1544,9 @@ class TestAdaptivePolling:
             return True
 
         watcher._stop_event.wait = recording_wait
-        watcher._loop = asyncio.new_event_loop()
+        watcher._async_runner.stop()
 
-        try:
-            watcher._run()
-        finally:
-            if watcher._loop and not watcher._loop.is_closed():
-                watcher._loop.close()
+        watcher._run()
 
         assert len(wait_times) >= 1
         assert wait_times[0] == 15
@@ -1591,13 +1580,9 @@ class TestAdaptivePolling:
             return len(wait_times) >= 4
 
         watcher._stop_event.wait = recording_wait
-        watcher._loop = asyncio.new_event_loop()
+        watcher._async_runner.stop()
 
-        try:
-            watcher._run()
-        finally:
-            if watcher._loop and not watcher._loop.is_closed():
-                watcher._loop.close()
+        watcher._run()
 
         # burst 3회: [1, 1, 1], 그 후 burst 소진 → burst_remaining 리셋 → 다시 진입
         # 최소 3회는 burst_interval이어야 함
@@ -1884,6 +1869,9 @@ class TestWatcherStartStop:
         )
         assert watcher._card_executor is None
 
+        # _make_watcher가 이미 AsyncRunner를 start()했으므로,
+        # watcher.start() → _run() → _async_runner.start() 중복 호출을 방지한다.
+        watcher._async_runner.stop()
         watcher.start()
         assert watcher._card_executor is not None
 
@@ -2086,7 +2074,7 @@ class TestLoadThreadCardsFieldValidation:
 class TestHandleNewCardRollback:
     """_handle_new_card 실패 시 카드 롤백 테스트"""
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_claude_failure_rolls_back_card(self, tmp_path, mock_plugin_sdk):
         """Claude 실행 실패 시 카드가 원래 리스트로 롤백됨"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -2109,8 +2097,6 @@ class TestHandleNewCardRollback:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
-        # _loop를 새 이벤트 루프로 설정 (closed 방지)
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_rollback",
@@ -2121,10 +2107,7 @@ class TestHandleNewCardRollback:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         # move_card 호출 내역 확인:
         # 1회: In Progress로 이동
@@ -2135,7 +2118,7 @@ class TestHandleNewCardRollback:
         rollback_call = move_calls[-1]
         assert rollback_call[0] == ("card_rollback", "list_togo")
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_claude_success_does_not_rollback(self, tmp_path, mock_plugin_sdk):
         """Claude 실행 성공 시 롤백이 발생하지 않음"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -2158,7 +2141,6 @@ class TestHandleNewCardRollback:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_success",
@@ -2169,17 +2151,14 @@ class TestHandleNewCardRollback:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         # move_card는 In Progress 이동 1회만 호출되어야 함
         move_calls = mock_trello.move_card.call_args_list
         assert len(move_calls) == 1
         assert move_calls[0][0] == ("card_success", "list_inprogress")
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_claude_exception_rolls_back_card(self, tmp_path, mock_plugin_sdk):
         """Claude 실행 중 예외 발생 시에도 카드가 원래 리스트로 롤백됨"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -2197,7 +2176,6 @@ class TestHandleNewCardRollback:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_exception",
@@ -2208,10 +2186,7 @@ class TestHandleNewCardRollback:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         # 롤백 호출 확인
         move_calls = mock_trello.move_card.call_args_list
@@ -2223,7 +2198,7 @@ class TestHandleNewCardRollback:
 class TestDeferredCardMove:
     """버그 1: 카드 이동이 Claude 실행 직전까지 지연되는지 검증"""
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_card_not_moved_before_spawn(self, tmp_path, mock_plugin_sdk):
         """_handle_new_card가 _spawn_claude_thread 전에 move_card를 호출하지 않음
 
@@ -2255,7 +2230,6 @@ class TestDeferredCardMove:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_deferred",
@@ -2266,10 +2240,7 @@ class TestDeferredCardMove:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         # move_card(In Progress)가 soulstream.run() 직전에 호출되었는지 확인
         # 순서: ("move_card", ..., "list_inprogress") → ("soulstream.run",)
@@ -2289,7 +2260,7 @@ class TestDeferredCardMove:
             f"move={move_indices[0]}, run={run_indices[0]}"
         )
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_card_tracked_before_spawn(self, tmp_path, mock_plugin_sdk):
         """카드가 _tracked에 등록된 후에 _spawn_claude_thread가 호출됨
 
@@ -2315,7 +2286,6 @@ class TestDeferredCardMove:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": "list_inprogress"}},
         )
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_tracked_order",
@@ -2326,15 +2296,12 @@ class TestDeferredCardMove:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         # soulstream.run 호출 시점에 카드가 이미 _tracked에 있어야 함
         assert "card_tracked_order" in tracked_at_run_time["snapshot"]
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_no_move_when_in_progress_list_not_configured(self, tmp_path, mock_plugin_sdk):
         """in_progress 리스트가 설정되지 않으면 move_card가 호출되지 않음"""
         from seosoyoung_plugins.trello.client import TrelloCard
@@ -2352,7 +2319,6 @@ class TestDeferredCardMove:
             trello_client=mock_trello,
             config={"list_ids": {"in_progress": None}},
         )
-        watcher._loop = asyncio.new_event_loop()
 
         card = TrelloCard(
             id="card_no_move",
@@ -2363,10 +2329,7 @@ class TestDeferredCardMove:
             labels=[],
         )
 
-        try:
-            watcher._handle_new_card(card, "to_go")
-        finally:
-            watcher._loop.close()
+        watcher._handle_new_card(card, "to_go")
 
         mock_trello.move_card.assert_not_called()
 
@@ -2374,7 +2337,7 @@ class TestDeferredCardMove:
 class TestOnStartCallback:
     """_spawn_claude_thread의 on_start 콜백 테스트"""
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_on_start_called_before_soulstream_run(self, tmp_path, mock_plugin_sdk):
         """on_start가 soulstream.run() 직전에 호출됨"""
         from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
@@ -2390,7 +2353,6 @@ class TestOnStartCallback:
         mock_plugin_sdk["soulstream"].run = AsyncMock(side_effect=tracking_run)
 
         watcher = _make_watcher(tmp_path)
-        watcher._loop = asyncio.new_event_loop()
 
         tracked = TrackedCard(
             card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
@@ -2398,17 +2360,14 @@ class TestOnStartCallback:
             channel_id="C123", detected_at="2026-01-01T00:00:00",
         )
 
-        try:
-            watcher._spawn_claude_thread(
-                prompt="test", thread_ts="1234.5678", channel="C123",
-                tracked=tracked, on_start=on_start,
-            )
-        finally:
-            watcher._loop.close()
+        watcher._spawn_claude_thread(
+            prompt="test", thread_ts="1234.5678", channel="C123",
+            tracked=tracked, on_start=on_start,
+        )
 
         assert call_order == ["on_start", "soulstream.run"]
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_on_start_exception_does_not_block_run(self, tmp_path, mock_plugin_sdk):
         """on_start에서 예외가 발생해도 soulstream.run()은 실행됨"""
         from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
@@ -2421,7 +2380,6 @@ class TestOnStartCallback:
             raise RuntimeError("on_start error")
 
         watcher = _make_watcher(tmp_path)
-        watcher._loop = asyncio.new_event_loop()
 
         tracked = TrackedCard(
             card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
@@ -2429,18 +2387,15 @@ class TestOnStartCallback:
             channel_id="C123", detected_at="2026-01-01T00:00:00",
         )
 
-        try:
-            watcher._spawn_claude_thread(
-                prompt="test", thread_ts="1234.5678", channel="C123",
-                tracked=tracked, on_start=on_start,
-            )
-        finally:
-            watcher._loop.close()
+        watcher._spawn_claude_thread(
+            prompt="test", thread_ts="1234.5678", channel="C123",
+            tracked=tracked, on_start=on_start,
+        )
 
         # on_start 실패에도 불구하고 soulstream.run이 호출되어야 함
         mock_plugin_sdk["soulstream"].run.assert_called_once()
 
-    @patch("seosoyoung_plugins.trello.watcher.threading.Thread", _SyncThread)
+    @patch("seosoyoung_plugins.trello.watcher._Thread", _SyncThread)
     def test_no_on_start_is_fine(self, tmp_path, mock_plugin_sdk):
         """on_start가 None이면 건너뛰고 정상 실행"""
         from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
@@ -2450,7 +2405,6 @@ class TestOnStartCallback:
         )
 
         watcher = _make_watcher(tmp_path)
-        watcher._loop = asyncio.new_event_loop()
 
         tracked = TrackedCard(
             card_id="c1", card_name="Test", card_url="https://trello.com/c/t",
@@ -2458,13 +2412,10 @@ class TestOnStartCallback:
             channel_id="C123", detected_at="2026-01-01T00:00:00",
         )
 
-        try:
-            watcher._spawn_claude_thread(
-                prompt="test", thread_ts="1234.5678", channel="C123",
-                tracked=tracked,
-            )
-        finally:
-            watcher._loop.close()
+        watcher._spawn_claude_thread(
+            prompt="test", thread_ts="1234.5678", channel="C123",
+            tracked=tracked,
+        )
 
         mock_plugin_sdk["soulstream"].run.assert_called_once()
 
