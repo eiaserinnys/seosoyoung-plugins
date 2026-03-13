@@ -226,8 +226,9 @@ class TrelloWatcher:
             has_execute=tracked.has_execute,
             created_at=tracked.detected_at,
         )
-        self._thread_cards[tracked.thread_ts] = info
-        self._save_thread_cards()
+        with self._state_lock:
+            self._thread_cards[tracked.thread_ts] = info
+            self._save_thread_cards()
         logger.debug(f"스레드-카드 매핑 등록: {tracked.thread_ts} -> {tracked.card_name}")
 
     def _untrack_card(self, card_id: str):
