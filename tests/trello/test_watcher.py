@@ -2420,5 +2420,37 @@ class TestOnStartCallback:
         mock_plugin_sdk["soulstream"].run.assert_called_once()
 
 
+class TestRegisterThreadCardThreadSafety:
+    """_register_thread_card 스레드 안전성 테스트"""
+
+    @pytest.mark.timeout(5)
+    def test_register_thread_card_thread_safe(self, tmp_path):
+        """여러 스레드에서 동시에 _register_thread_card 호출 시 모든 항목 보존됨"""
+        watcher = _make_watcher(tmp_path)
+
+        cards = [
+            TrackedCard(
+                card_id=f"card-{i}", card_name=f"Card {i}", card_url="",
+                list_id="list1", list_key="to_go",
+                thread_ts=f"ts-{i}", channel_id="C123",
+                detected_at="2026-01-01T00:00:00", has_execute=False,
+            )
+            for i in range(10)
+        ]
+
+        threads = [
+            threading.Thread(target=watcher._register_thread_card, args=(tc,))
+            for tc in cards
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(watcher._thread_cards) == 10
+        for i in range(10):
+            assert f"ts-{i}" in watcher._thread_cards
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
