@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 from seosoyoung_plugins.trello.watcher import TrelloWatcher, TrackedCard
+from tests.trello.helpers import _make_prompt_builder_mock
 
 
 def _make_watcher(tmp_path, **overrides):
@@ -17,7 +18,7 @@ def _make_watcher(tmp_path, **overrides):
     overrides 로 개별 파라미터를 덮어쓸 수 있다.
     """
     trello_client = overrides.pop("trello_client", MagicMock())
-    prompt_builder = overrides.pop("prompt_builder", MagicMock())
+    prompt_builder = overrides.pop("prompt_builder", _make_prompt_builder_mock())
     get_session_lock = overrides.pop("get_session_lock", None)
     list_runner_ref = overrides.pop("list_runner_ref", None)
     data_dir = overrides.pop("data_dir", tmp_path)
@@ -142,8 +143,8 @@ class TestTrelloWatcherTrackedCardLookup:
         result = watcher.get_tracked_by_thread_ts("nonexistent_ts")
         assert result is None
 
-    def test_build_reaction_execute_prompt(self, tmp_path):
-        """리액션 기반 실행 프롬프트 생성"""
+    def test_build_reaction_execute_request(self, tmp_path):
+        """리액션 기반 실행 요청 (prompt, context_items) 반환"""
         from seosoyoung_plugins.trello.watcher import ThreadCardInfo
         from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
@@ -164,20 +165,25 @@ class TestTrelloWatcherTrackedCardLookup:
             created_at="2024-01-01T00:00:00"
         )
 
-        prompt = watcher.build_reaction_execute_prompt(info)
+        prompt, context_items = watcher.build_reaction_execute_request(info)
 
         assert "🚀 리액션으로 실행이 요청된" in prompt
         assert "기능 구현 작업" in prompt
-        assert "card123" in prompt
-        assert "https://trello.com/c/abc123" in prompt
-        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in prompt
+        assert isinstance(context_items, list)
+        card_info_item = next((i for i in context_items if i["key"] == "card_info"), None)
+        assert card_info_item is not None
+        assert "card123" in card_info_item["content"]
+        assert "https://trello.com/c/abc123" in card_info_item["content"]
+        auto_move_item = next((i for i in context_items if i["key"] == "auto_move_notice"), None)
+        assert auto_move_item is not None
+        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in auto_move_item["content"]
 
 
 class TestAutoMoveNoticeInPrompts:
-    """프롬프트에 카드 자동 이동 안내가 포함되는지 테스트"""
+    """context_items에 카드 자동 이동 안내가 포함되는지 테스트"""
 
-    def test_to_go_execute_prompt_has_auto_move_notice(self, tmp_path):
-        """실행 모드 프롬프트에 자동 이동 안내 포함"""
+    def test_to_go_execute_request_has_auto_move_notice(self, tmp_path):
+        """실행 모드 context_items에 자동 이동 안내 포함"""
         from seosoyoung_plugins.trello.client import TrelloCard
         from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
@@ -197,12 +203,14 @@ class TestAutoMoveNoticeInPrompts:
             labels=[],
         )
 
-        prompt = watcher.prompt_builder.build_to_go(card, has_execute=True)
-        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in prompt
-        assert "In Progress로 이동하지 마세요" in prompt
+        _, context_items = watcher.prompt_builder.build_to_go_request(card, has_execute=True)
+        auto_move = next((i for i in context_items if i["key"] == "auto_move_notice"), None)
+        assert auto_move is not None
+        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in auto_move["content"]
+        assert "In Progress로 이동하지 마세요" in auto_move["content"]
 
-    def test_to_go_plan_prompt_has_auto_move_notice(self, tmp_path):
-        """계획 모드 프롬프트에 자동 이동 안내 포함"""
+    def test_to_go_plan_request_has_auto_move_notice_and_plan_guide(self, tmp_path):
+        """계획 모드 context_items에 자동 이동 안내 + 계획 지침 포함"""
         from seosoyoung_plugins.trello.client import TrelloCard
         from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
@@ -222,10 +230,14 @@ class TestAutoMoveNoticeInPrompts:
             labels=[],
         )
 
-        prompt = watcher.prompt_builder.build_to_go(card, has_execute=False)
-        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in prompt
-        assert "In Progress로 이동하지 마세요" in prompt
-        assert "📦 Backlog로 이동하세요" in prompt
+        _, context_items = watcher.prompt_builder.build_to_go_request(card, has_execute=False)
+        auto_move = next((i for i in context_items if i["key"] == "auto_move_notice"), None)
+        assert auto_move is not None
+        assert "이미 워처에 의해 🔨 In Progress로 이동되었습니다" in auto_move["content"]
+        assert "In Progress로 이동하지 마세요" in auto_move["content"]
+        plan_guide = next((i for i in context_items if i["key"] == "plan_guide"), None)
+        assert plan_guide is not None
+        assert "Backlog" in plan_guide["content"]
 
 
 class TestListRunSaySignature:
@@ -894,7 +906,8 @@ class TestMultiCardChainingIntegration:
 
         def sync_spawn(*, prompt, thread_ts, channel,
                        tracked, dm_channel_id=None, dm_thread_ts=None,
-                       on_success=None, on_error=None, on_finally=None):
+                       on_success=None, on_error=None, on_finally=None,
+                       context=None):
             if on_success:
                 on_success()
             if on_finally:
@@ -955,7 +968,8 @@ class TestMultiCardChainingIntegration:
 
         def sync_spawn(*, prompt, thread_ts, channel,
                        tracked, dm_channel_id=None, dm_thread_ts=None,
-                       on_success=None, on_error=None, on_finally=None):
+                       on_success=None, on_error=None, on_finally=None,
+                       context=None):
             if on_success:
                 on_success()
             if on_finally:
@@ -1293,7 +1307,8 @@ class TestListRunOnSuccessLockOrder:
 
         def intercepting_spawn(*, prompt, thread_ts, channel,
                                tracked, dm_channel_id=None, dm_thread_ts=None,
-                               on_success=None, on_error=None, on_finally=None):
+                               on_success=None, on_error=None, on_finally=None,
+                               context=None):
             def wrapped_on_success():
                 acquired_flag = [None]
                 lock_checked = threading.Event()
@@ -1318,6 +1333,7 @@ class TestListRunOnSuccessLockOrder:
                 on_success=wrapped_on_success,
                 on_error=on_error,
                 on_finally=on_finally,
+                context=context,
             )
 
         watcher._spawn_claude_thread = intercepting_spawn
