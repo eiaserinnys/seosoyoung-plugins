@@ -138,17 +138,9 @@ class TestExecuteInterveneRecentMessagesSlicing:
         target_ts = pending[15]["ts"]  # target at index 15
         action = InterventionAction(type="message", target=target_ts, content="")
 
-        captured = {}
-
-        async def mock_run(**kwargs):
-            return MagicMock(ok=False)
-
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.build_channel_intervene_user_prompt"
-            ) as mock_build,
             patch(
                 "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
                 return_value="sys",
@@ -156,10 +148,10 @@ class TestExecuteInterveneRecentMessagesSlicing:
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
-            mock_build.return_value = "user prompt"
 
             store = MagicMock()
             store.get_digest.return_value = None
+            store.load_judged.return_value = []
 
             await _execute_intervene(
                 store=store,
@@ -169,11 +161,12 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=10,
             )
 
-            # build_channel_intervene_user_prompt should receive 10 recent messages
-            call_kwargs = mock_build.call_args.kwargs
-            recent = call_kwargs["recent_messages"]
+            # soulstream.run context should contain 10 recent_messages
+            call_kwargs = mock_soul.run.call_args.kwargs
+            context = call_kwargs["context"]
+            recent_item = next(item for item in context if item["key"] == "recent_messages")
             # index 15, count 10 -> slice [5:15] = 10 messages
-            assert len(recent) == 10
+            assert len(recent_item["content"]) == 10
 
     @pytest.mark.asyncio
     async def test_thread_buffer_fallback_uses_count(self):
@@ -190,19 +183,16 @@ class TestExecuteInterveneRecentMessagesSlicing:
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
             patch(
-                "seosoyoung_plugins.channel_observer.pipeline.build_channel_intervene_user_prompt"
-            ) as mock_build,
-            patch(
                 "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
                 return_value="sys",
             ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
-            mock_build.return_value = "user prompt"
 
             store = MagicMock()
             store.get_digest.return_value = None
+            store.load_judged.return_value = []
 
             await _execute_intervene(
                 store=store,
@@ -213,26 +203,29 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=8,
             )
 
-            call_kwargs = mock_build.call_args.kwargs
-            recent = call_kwargs["recent_messages"]
-            assert len(recent) == 8
+            call_kwargs = mock_soul.run.call_args.kwargs
+            context = call_kwargs["context"]
+            recent_item = next(item for item in context if item["key"] == "recent_messages")
+            assert len(recent_item["content"]) == 8
 
     @pytest.mark.asyncio
     async def test_judged_fallback_uses_count(self):
-        """When trigger found in judged, last N pending used."""
+        """When trigger found in judged, slice [i-N:i] uses N messages before trigger."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
-        pending = self._make_pending(20)
-        judged_msg = {"ts": "8888.000000", "text": "judged msg", "user": "U88"}
-        action = InterventionAction(type="message", target="8888.000000", content="")
+        # 15 judged messages — trigger at index 13 → 12 prior messages
+        judged_msgs = [
+            {"ts": f"j{i:02d}.000000", "text": f"judged {i}", "user": f"UJ{i}"}
+            for i in range(15)
+        ]
+        trigger_ts = judged_msgs[13]["ts"]  # index 13 in judged
+        action = InterventionAction(type="message", target=trigger_ts, content="")
+        pending = self._make_pending(5)
 
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.build_channel_intervene_user_prompt"
-            ) as mock_build,
             patch(
                 "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
                 return_value="sys",
@@ -240,11 +233,10 @@ class TestExecuteInterveneRecentMessagesSlicing:
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
-            mock_build.return_value = "user prompt"
 
             store = MagicMock()
             store.get_digest.return_value = None
-            store.load_judged.return_value = [judged_msg]
+            store.load_judged.return_value = judged_msgs  # trigger at index 13
 
             await _execute_intervene(
                 store=store,
@@ -254,9 +246,12 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=12,
             )
 
-            call_kwargs = mock_build.call_args.kwargs
-            recent = call_kwargs["recent_messages"]
-            assert len(recent) == 12
+            # all_context = judged_msgs + pending, trigger at index 13
+            # recent = all_context[max(0, 13-12):13] = all_context[1:13] = 12 messages
+            call_kwargs = mock_soul.run.call_args.kwargs
+            context = call_kwargs["context"]
+            recent_item = next(item for item in context if item["key"] == "recent_messages")
+            assert len(recent_item["content"]) == 12
 
     @pytest.mark.asyncio
     async def test_channel_target_uses_count(self):
@@ -271,19 +266,16 @@ class TestExecuteInterveneRecentMessagesSlicing:
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
             patch(
-                "seosoyoung_plugins.channel_observer.pipeline.build_channel_intervene_user_prompt"
-            ) as mock_build,
-            patch(
                 "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
                 return_value="sys",
             ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
-            mock_build.return_value = "user prompt"
 
             store = MagicMock()
             store.get_digest.return_value = None
+            store.load_judged.return_value = []
 
             await _execute_intervene(
                 store=store,
@@ -293,10 +285,11 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=10,
             )
 
-            call_kwargs = mock_build.call_args.kwargs
-            recent = call_kwargs["recent_messages"]
+            call_kwargs = mock_soul.run.call_args.kwargs
+            context = call_kwargs["context"]
+            recent_item = next(item for item in context if item["key"] == "recent_messages")
             # channel target: last item is trigger, preceding N are recent
-            assert len(recent) == 10
+            assert len(recent_item["content"]) == 10
 
     @pytest.mark.asyncio
     async def test_default_count_is_5(self):
@@ -311,19 +304,16 @@ class TestExecuteInterveneRecentMessagesSlicing:
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
             patch(
-                "seosoyoung_plugins.channel_observer.pipeline.build_channel_intervene_user_prompt"
-            ) as mock_build,
-            patch(
                 "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
                 return_value="sys",
             ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
-            mock_build.return_value = "user prompt"
 
             store = MagicMock()
             store.get_digest.return_value = None
+            store.load_judged.return_value = []
 
             await _execute_intervene(
                 store=store,
@@ -333,6 +323,7 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 # no recent_messages_count -> default
             )
 
-            call_kwargs = mock_build.call_args.kwargs
-            recent = call_kwargs["recent_messages"]
-            assert len(recent) == 5
+            call_kwargs = mock_soul.run.call_args.kwargs
+            context = call_kwargs["context"]
+            recent_item = next(item for item in context if item["key"] == "recent_messages")
+            assert len(recent_item["content"]) == 5

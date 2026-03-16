@@ -98,10 +98,11 @@ class MemoryPlugin(Plugin):
             channel: str | None
             session_id: str | None
             prompt: str
+            context_items: list[dict]  (from structured context, Phase 3+)
             channel_observer_channels: list[str]  (from ChannelObserverPlugin)
 
         Returns:
-            dict with "prompt" (modified) and "anchor_ts"
+            dict with "context_items" (appended) and "anchor_ts"
         """
         thread_ts = ctx.args.get("thread_ts", "")
         if not thread_ts:
@@ -110,6 +111,7 @@ class MemoryPlugin(Plugin):
         channel = ctx.args.get("channel")
         session_id = ctx.args.get("session_id")
         prompt = ctx.args.get("prompt", "")
+        context_items = ctx.args.get("context_items", [])
 
         try:
             memory_prompt, anchor_ts = self._prepare_injection(
@@ -119,13 +121,17 @@ class MemoryPlugin(Plugin):
                 ),
             )
 
-            result = {"anchor_ts": anchor_ts}
+            result: dict = {"anchor_ts": anchor_ts}
             if memory_prompt:
-                result["prompt"] = (
-                    f"{memory_prompt}\n\n"
-                    f"위 컨텍스트를 참고하여 질문에 답변해주세요.\n\n"
-                    f"사용자의 질문: {prompt}"
+                updated_items = list(context_items)
+                updated_items.append(
+                    {
+                        "key": "long_term_memory",
+                        "label": "장기 기억",
+                        "content": memory_prompt,
+                    }
                 )
+                result["context_items"] = updated_items
 
             return HookResult.CONTINUE, result
 

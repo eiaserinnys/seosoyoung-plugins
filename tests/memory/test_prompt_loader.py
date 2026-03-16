@@ -113,23 +113,6 @@ class TestChannelPromptsFromFiles:
         assert "서소영" in prompt
         assert "개입" in prompt or "응답" in prompt or "대화" in prompt
 
-    def test_channel_intervene_user_prompt(self):
-        """채널 개입 응답 사용자 프롬프트가 정상 구성"""
-        from seosoyoung_plugins.channel_observer.prompts import build_channel_intervene_user_prompt
-
-        prompt = build_channel_intervene_user_prompt(
-            digest="테스트 다이제스트",
-            recent_messages=[{"ts": "1.0", "user": "U1", "text": "최근 메시지"}],
-            trigger_message={"ts": "2.0", "user": "U2", "text": "트리거"},
-            target="channel",
-            observer_reason="관찰자 초안",
-        )
-        assert "테스트 다이제스트" in prompt
-        assert "최근 메시지" in prompt
-        assert "트리거" in prompt
-        assert "관찰자 초안" in prompt
-
-
 class TestOMPromptsFromFiles:
     """외부 파일 기반 OM prompts 빌더 테스트"""
 

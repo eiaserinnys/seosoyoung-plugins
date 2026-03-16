@@ -1564,14 +1564,18 @@ class TestInterveneRecentMessagesFromJudged:
             llm_call=mock_llm,
         )
 
-        # soulstream.run 호출된 프롬프트에 judged 메시지 텍스트가 포함
+        # soulstream.run 호출 확인
         mock_plugin_sdk["soulstream"].run.assert_awaited_once()
-        prompt = mock_plugin_sdk["soulstream"].run.call_args[1]["prompt"]
-        # judged 메시지의 텍스트가 recent_messages로 프롬프트에 포함되어야 함
-        assert "판단 완료 메시지 0번" in prompt
-        assert "판단 완료 메시지 4번" in prompt
-        # 트리거 메시지 자체도 포함
-        assert "트리거 메시지" in prompt
+        call_kwargs = mock_plugin_sdk["soulstream"].run.call_args[1]
+        # prompt = 트리거 메시지 텍스트
+        assert call_kwargs["prompt"] == "트리거 메시지"
+        # judged 메시지의 텍스트가 context["recent_messages"]에 포함되어야 함
+        context = call_kwargs["context"]
+        recent_item = next(item for item in context if item["key"] == "recent_messages")
+        recent_texts = [m["text"] for m in recent_item["content"]]
+        # 텍스트에 접두어만 확인 (내용이 길 수 있어 startswith 사용)
+        assert any(t.startswith("판단 완료 메시지 0번") for t in recent_texts)
+        assert any(t.startswith("판단 완료 메시지 4번") for t in recent_texts)
 
     @pytest.mark.asyncio
     async def test_combined_judged_pending_context(self, store, channel_id, mock_plugin_sdk):
@@ -1605,13 +1609,17 @@ class TestInterveneRecentMessagesFromJudged:
         )
 
         mock_plugin_sdk["soulstream"].run.assert_awaited_once()
-        prompt = mock_plugin_sdk["soulstream"].run.call_args[1]["prompt"]
+        call_kwargs = mock_plugin_sdk["soulstream"].run.call_args[1]
         # recent_messages_count=5 (기본값)이므로 트리거 직전 5개:
         # all_context = [judged_0..4, pending_0..2], 트리거=pending_2(index 7)
         # recent = all_context[2:7] = [judged_2, judged_3, judged_4, pending_0, pending_1]
-        assert "판단 완료 메시지 2번" in prompt
-        assert "판단 완료 메시지 4번" in prompt
-        assert "pending 메시지 0번" in prompt
-        assert "pending 메시지 1번" in prompt
+        context = call_kwargs["context"]
+        recent_item = next(item for item in context if item["key"] == "recent_messages")
+        recent_texts = [m["text"] for m in recent_item["content"]]
+        # 텍스트에 접두어만 확인 (내용이 길 수 있어 startswith 사용)
+        assert any(t.startswith("판단 완료 메시지 2번") for t in recent_texts)
+        assert any(t.startswith("판단 완료 메시지 4번") for t in recent_texts)
+        assert "pending 메시지 0번" in recent_texts
+        assert "pending 메시지 1번" in recent_texts
         # judged_0, judged_1은 윈도우 밖 → 포함되지 않음
-        assert "판단 완료 메시지 0번" not in prompt
+        assert not any(t.startswith("판단 완료 메시지 0번") for t in recent_texts)
