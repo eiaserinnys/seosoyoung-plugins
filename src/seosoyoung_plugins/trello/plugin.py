@@ -198,7 +198,7 @@ class TrelloPlugin(Plugin):
             return HookResult.STOP, None
 
         # 6. Build execute prompt
-        prompt = self._watcher.build_reaction_execute_prompt(tracked)
+        prompt, context_items = self._watcher.build_reaction_execute_request(tracked)
 
         # 7. Set has_execute flag
         tracked.has_execute = True
@@ -219,6 +219,7 @@ class TrelloPlugin(Plugin):
                     start_msg_ts,
                     session_id,
                     prompt,
+                    context=context_items,
                 ))
             finally:
                 loop.close()
@@ -235,6 +236,7 @@ class TrelloPlugin(Plugin):
         start_msg_ts: str,
         session_id: str | None,
         prompt: str,
+        context: list[dict] | None = None,
     ):
         """Execute Claude with compact in async context."""
         lock = _get_session_lock(thread_ts)
@@ -278,6 +280,7 @@ class TrelloPlugin(Plugin):
                 thread_ts=thread_ts,
                 session_id=session_id,
                 role="admin",
+                context=context,
             )
 
             if not result.ok:

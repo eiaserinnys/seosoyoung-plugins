@@ -287,7 +287,7 @@ class TestTrelloOnReaction:
         mock_tracked.card_id = "card-123"
         mock_tracked.card_name = "Test Card"
         plugin_with_watcher._watcher.get_tracked_by_thread_ts.return_value = mock_tracked
-        plugin_with_watcher._watcher.build_reaction_execute_prompt.return_value = "execute prompt"
+        plugin_with_watcher._watcher.build_reaction_execute_request.return_value = ("execute prompt", [])
 
         event = {
             "reaction": "rocket",
