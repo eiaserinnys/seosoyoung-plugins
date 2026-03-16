@@ -624,7 +624,7 @@ class TrelloWatcher:
 
         self._register_thread_card(tracked)
 
-        prompt = self.prompt_builder.build_to_go(card, has_execute)
+        prompt, context_items = self.prompt_builder.build_to_go_request(card, has_execute)
         card_id_for_cleanup = card.id
         card_name_with_spinner = f"🌀 {card.name}"
         original_list_id = card.list_id
@@ -660,11 +660,14 @@ class TrelloWatcher:
             channel=msg_channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
             on_start=on_start, on_error=on_error, on_finally=on_finally,
+            context=context_items,
         )
 
-    def build_reaction_execute_prompt(self, info: ThreadCardInfo) -> str:
-        """하위 호환: PromptBuilder에 위임"""
-        return self.prompt_builder.build_reaction_execute(info)
+    def build_reaction_execute_request(
+        self, info: ThreadCardInfo
+    ) -> tuple[str, list[dict]]:
+        """PromptBuilder에 위임 — (prompt, context_items) 반환"""
+        return self.prompt_builder.build_reaction_execute_request(info)
 
     def _spawn_claude_thread(
         self,
@@ -679,6 +682,7 @@ class TrelloWatcher:
         on_success: Optional[Callable] = None,
         on_error: Optional[Callable] = None,
         on_finally: Optional[Callable] = None,
+        context: Optional[list[dict]] = None,
     ):
         """Claude 실행 스레드 스포닝 (plugin_sdk 사용)
 
@@ -711,6 +715,7 @@ class TrelloWatcher:
                         dm_channel_id=dm_channel_id,
                         dm_thread_ts=dm_thread_ts,
                         trello_card=tracked,
+                        context=context,
                     )
                 )
 
@@ -1000,7 +1005,7 @@ class TrelloWatcher:
             )
         )
 
-        prompt = self.prompt_builder.build_list_run(
+        prompt, context_items = self.prompt_builder.build_list_run_request(
             card, session_id, session.current_index + 1, len(session.card_ids)
         )
 
@@ -1053,4 +1058,5 @@ class TrelloWatcher:
             channel=channel, tracked=tracked,
             dm_channel_id=dm_channel_id, dm_thread_ts=dm_thread_ts,
             on_success=on_success, on_error=on_error,
+            context=context_items,
         )

@@ -32,7 +32,6 @@ from seosoyoung_plugins.channel_observer.observer import (
     JudgeResult,
 )
 from seosoyoung_plugins.channel_observer.prompts import (
-    build_channel_intervene_user_prompt,
     get_channel_intervene_system_prompt,
 )
 from seosoyoung_plugins.channel_observer.store import ChannelStore
@@ -812,32 +811,67 @@ async def _execute_intervene(
         trigger_message = all_context[-1]
         recent_messages = all_context[-(recent_messages_count + 1):-1]
 
-    # 3. 프롬프트 구성
+    # 3. 프롬프트 / 컨텍스트 구성
     system_prompt = get_channel_intervene_system_prompt()
-    user_prompt = build_channel_intervene_user_prompt(
-        digest=digest,
-        recent_messages=recent_messages,
-        trigger_message=trigger_message,
-        target=action.target or "channel",
-        observer_reason=observer_reason,
-        
-        thread_buffers=thread_buffers,
+
+    # 스레드 대상이면 해당 ts, 채널 대상이면 트리거 메시지 ts를 세션 키로 사용
+    run_thread_ts = (
+        action.target
+        if action.target and action.target != "channel"
+        else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
     )
+
+    # trigger_message 텍스트를 prompt로, 나머지를 context_items로 분리
+    prompt = trigger_message.get("text", "") if trigger_message else ""
+    context_items = [
+        {
+            "key": "system_prompt",
+            "label": "시스템 프롬프트",
+            "content": system_prompt,
+        },
+        {
+            "key": "channel_digest",
+            "label": "채널 요약",
+            "content": digest if digest else "",
+        },
+        {
+            "key": "recent_messages",
+            "label": "최근 메시지",
+            "content": [
+                {
+                    "user": m.get("user", ""),
+                    "text": m.get("text", ""),
+                    "ts": m.get("ts", ""),
+                }
+                for m in recent_messages
+            ],
+        },
+        {
+            "key": "thread_context",
+            "label": "스레드 맥락",
+            "content": {
+                tid: [
+                    {"user": m.get("user", ""), "text": m.get("text", "")}
+                    for m in msgs
+                ]
+                for tid, msgs in (thread_buffers or {}).items()
+            },
+        },
+        {
+            "key": "observer_reason",
+            "label": "관찰자 판단 근거",
+            "content": observer_reason or "",
+        },
+    ]
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
     try:
-        combined_prompt = f"{system_prompt}\n\n{user_prompt}"
-        # 스레드 대상이면 해당 ts, 채널 대상이면 트리거 메시지 ts를 세션 키로 사용
-        run_thread_ts = (
-            action.target
-            if action.target and action.target != "channel"
-            else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
-        )
         result = await soulstream.run(
-            prompt=combined_prompt,
+            prompt=prompt,
             channel=channel_id,
             thread_ts=run_thread_ts,
             text_only=True,
+            context=context_items,
         )
         if result.ok:
             response_text = result.output

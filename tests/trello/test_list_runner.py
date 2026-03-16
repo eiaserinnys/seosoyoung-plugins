@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import seosoyoung_plugins.trello.watcher as _watcher_mod
 from seosoyoung_plugins.trello.watcher import TrelloWatcher
+from tests.trello.helpers import _make_prompt_builder_mock
 
 
 def _make_watcher(tmp_path, **overrides):
@@ -19,7 +20,7 @@ def _make_watcher(tmp_path, **overrides):
     import asyncio
 
     trello_client = overrides.pop("trello_client", MagicMock())
-    prompt_builder = overrides.pop("prompt_builder", MagicMock())
+    prompt_builder = overrides.pop("prompt_builder", _make_prompt_builder_mock())
     get_session_lock = overrides.pop("get_session_lock", None)
     list_runner_ref = overrides.pop("list_runner_ref", None)
     data_dir = overrides.pop("data_dir", tmp_path)
