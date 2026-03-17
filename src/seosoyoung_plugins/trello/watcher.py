@@ -913,6 +913,80 @@ class TrelloWatcher:
         # 4. 첫 카드 처리 시작
         self._process_list_run_card(session.session_id, run_thread_ts, run_channel)
 
+    def resume_list_run_session(
+        self,
+        session,
+        notify_channel: str,
+        reason: str = "재개",
+    ) -> None:
+        """중단된 정주행 세션을 재개한다.
+
+        ListRunner를 통해 세션 상태를 RUNNING으로 바꾸고,
+        notify_channel에 재개 알림 메시지를 전송한 뒤,
+        백그라운드 스레드에서 _process_list_run_card를 실행한다.
+
+        Slack 알림 전송이 실패하면 예외를 발생시키고 세션 상태는
+        PAUSED로 유지한다 (resume_run을 호출하지 않는다).
+
+        Args:
+            session: ListRunSession (PAUSED 상태)
+            notify_channel: 재개 알림을 보낼 슬랙 채널 ID
+            reason: 재개 사유 (로그/알림용)
+
+        Raises:
+            RuntimeError: ListRunner가 없거나, 세션을 재개할 수 없는 경우
+            Exception: 슬랙 알림 전송 실패 시
+        """
+        list_runner = self.list_runner_ref() if self.list_runner_ref else None
+        if not list_runner:
+            raise RuntimeError("ListRunner가 설정되지 않아 정주행을 재개할 수 없습니다.")
+
+        # 1. 재개 알림 메시지 전송 → 실패 시 예외 (세션 상태 변경 없이 중단)
+        dm_channel_id, dm_thread_ts = self._open_dm_thread(
+            f"📋 {session.list_name} 정주행 재개", ""
+        )
+
+        if dm_channel_id and dm_thread_ts:
+            run_channel = dm_channel_id
+            run_thread_ts = dm_thread_ts
+        else:
+            run_channel = notify_channel
+            result = self._async_runner.run(
+                slack.send_message(
+                    channel=notify_channel,
+                    text=(
+                        f"▶️ *리스트 정주행 재개* ({reason})\n"
+                        f"📋 리스트: *{session.list_name}*\n"
+                        f"🔖 세션: `{session.session_id}`\n"
+                        f"진행: {session.current_index}/{len(session.card_ids)}"
+                    ),
+                )
+            )
+            if not result.ok:
+                raise RuntimeError(
+                    f"재개 알림 전송 실패: {result.error}"
+                )
+            run_thread_ts = result.ts
+
+        # 2. 세션 상태를 RUNNING으로 전환
+        if not list_runner.resume_run(session.session_id):
+            raise RuntimeError(
+                f"세션을 재개할 수 없습니다: {session.session_id} "
+                f"(현재 상태: {session.status})"
+            )
+
+        # 3. 백그라운드 스레드에서 카드 처리 시작
+        t = _Thread(
+            target=self._process_list_run_card,
+            args=(session.session_id, run_thread_ts, run_channel),
+            daemon=True,
+        )
+        t.start()
+        logger.info(
+            "resume_list_run_session: session=%s (%s), reason=%s",
+            session.session_id, session.list_name, reason,
+        )
+
     def _process_list_run_card(self, session_id: str, thread_ts: str, run_channel: str = None):
         """리스트 정주행 카드 처리"""
         list_runner = self.list_runner_ref() if self.list_runner_ref else None
