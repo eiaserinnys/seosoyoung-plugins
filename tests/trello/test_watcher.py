@@ -2468,5 +2468,153 @@ class TestRegisterThreadCardThreadSafety:
             assert f"ts-{i}" in watcher._thread_cards
 
 
+class TestResumeListRunSession:
+    """TrelloWatcher.resume_list_run_session 테스트"""
+
+    def _make_paused_session(self, session_id="sess-abc", list_name="Sprint 1", current_index=2, card_count=5):
+        """PAUSED 상태의 ListRunSession Mock 생성 헬퍼"""
+        from seosoyoung_plugins.trello.list_runner import SessionStatus
+        session = MagicMock()
+        session.session_id = session_id
+        session.list_name = list_name
+        session.current_index = current_index
+        session.card_ids = [f"card-{i}" for i in range(card_count)]
+        session.status = SessionStatus.PAUSED
+        return session
+
+    def test_raises_when_no_list_runner(self, tmp_path):
+        """list_runner_ref가 None이면 RuntimeError를 발생시킨다."""
+        watcher = _make_watcher(tmp_path, list_runner_ref=None)
+        session = self._make_paused_session()
+
+        with pytest.raises(RuntimeError, match="ListRunner"):
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+    def test_raises_when_list_runner_ref_returns_none(self, tmp_path):
+        """list_runner_ref()가 None을 반환하면 RuntimeError를 발생시킨다."""
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: None)
+        session = self._make_paused_session()
+
+        with pytest.raises(RuntimeError, match="ListRunner"):
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+    def test_raises_when_slack_send_fails(self, tmp_path, mock_plugin_sdk):
+        """슬랙 알림 전송이 실패하면 RuntimeError를 발생시키고 resume_run을 호출하지 않는다."""
+        mock_list_runner = MagicMock()
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: mock_list_runner)
+        session = self._make_paused_session()
+
+        mock_plugin_sdk["slack"].send_message = AsyncMock(
+            return_value=MagicMock(ok=False, error="channel_not_found")
+        )
+
+        with pytest.raises(RuntimeError, match="알림 전송 실패"):
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+        mock_list_runner.resume_run.assert_not_called()
+
+    def test_raises_when_resume_run_fails(self, tmp_path, mock_plugin_sdk):
+        """resume_run이 False를 반환하면 RuntimeError를 발생시킨다."""
+        mock_list_runner = MagicMock()
+        mock_list_runner.resume_run.return_value = False
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: mock_list_runner)
+        session = self._make_paused_session()
+
+        with pytest.raises(RuntimeError, match="재개할 수 없습니다"):
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+    def test_success_sends_notification_and_resumes(self, tmp_path, mock_plugin_sdk):
+        """정상 경로: 슬랙 알림 전송 → resume_run 호출 → 백그라운드 스레드 시작."""
+        mock_list_runner = MagicMock()
+        mock_list_runner.resume_run.return_value = True
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: mock_list_runner)
+        session = self._make_paused_session()
+
+        with patch("seosoyoung_plugins.trello.watcher._Thread") as MockThread:
+            mock_thread_instance = MagicMock()
+            MockThread.return_value = mock_thread_instance
+
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+                reason="테스트 재개",
+            )
+
+        # 슬랙 알림이 전송되었는지 확인
+        mock_plugin_sdk["slack"].send_message.assert_called_once()
+        call_kwargs = mock_plugin_sdk["slack"].send_message.call_args[1]
+        assert "C_NOTIFY" == call_kwargs.get("channel") or \
+               mock_plugin_sdk["slack"].send_message.call_args[0][0] == "C_NOTIFY"
+
+        # resume_run이 호출되었는지 확인
+        mock_list_runner.resume_run.assert_called_once_with(session.session_id)
+
+        # 백그라운드 스레드가 시작되었는지 확인
+        MockThread.assert_called_once()
+        mock_thread_instance.start.assert_called_once()
+
+    def test_success_notification_contains_session_info(self, tmp_path, mock_plugin_sdk):
+        """알림 메시지에 세션 ID와 리스트 이름이 포함된다."""
+        mock_list_runner = MagicMock()
+        mock_list_runner.resume_run.return_value = True
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: mock_list_runner)
+        session = self._make_paused_session(session_id="sess-xyz", list_name="My Sprint")
+
+        with patch("seosoyoung_plugins.trello.watcher._Thread"):
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+        # Collect all string values from positional and keyword args
+        call_args, call_kwargs = mock_plugin_sdk["slack"].send_message.call_args
+        all_text = " ".join(str(v) for v in list(call_args) + list(call_kwargs.values()))
+        assert "sess-xyz" in all_text
+        assert "My Sprint" in all_text
+
+    def test_process_list_run_card_called_with_correct_args(self, tmp_path, mock_plugin_sdk):
+        """백그라운드 스레드가 _process_list_run_card를 올바른 인자로 호출한다."""
+        mock_list_runner = MagicMock()
+        mock_list_runner.resume_run.return_value = True
+        watcher = _make_watcher(tmp_path, list_runner_ref=lambda: mock_list_runner)
+        session = self._make_paused_session()
+
+        thread_calls = []
+
+        with patch("seosoyoung_plugins.trello.watcher._Thread") as MockThread:
+            def capture_thread(target, args, daemon):
+                thread_calls.append({"target": target, "args": args})
+                mock_t = MagicMock()
+                mock_t.start = MagicMock()
+                return mock_t
+            MockThread.side_effect = capture_thread
+
+            watcher.resume_list_run_session(
+                session=session,
+                notify_channel="C_NOTIFY",
+            )
+
+        assert len(thread_calls) == 1
+        target = thread_calls[0]["target"]
+        args = thread_calls[0]["args"]
+
+        assert target == watcher._process_list_run_card
+        # args[0]: session_id, args[1]: thread_ts (슬랙 메시지 ts), args[2]: channel
+        assert args[0] == session.session_id
+        assert args[2] == "C_NOTIFY"  # run_channel
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
