@@ -104,7 +104,7 @@ class TrelloPlugin(Plugin):
     # -- Hook handlers ---------------------------------------------------------
 
     async def _on_startup(self, ctx: HookContext) -> tuple[HookResult, Any]:
-        """Start watcher and list runner."""
+        """Start watcher and list runner, then auto-resume any paused sessions."""
         from seosoyoung_plugins.trello.watcher import TrelloWatcher
         from seosoyoung_plugins.trello.list_runner import ListRunner
 
@@ -125,10 +125,50 @@ class TrelloPlugin(Plugin):
 
         logger.info("TrelloPlugin: watcher and list_runner started")
 
+        # Auto-resume paused sessions from before the reboot
+        await self._auto_resume_paused_sessions()
+
         return HookResult.CONTINUE, {
             "watcher": self._watcher,
             "list_runner": self._list_runner,
         }
+
+    async def _auto_resume_paused_sessions(self) -> None:
+        """Automatically resume all PAUSED sessions after reboot.
+
+        Iterates over every PAUSED session, sends a notification to
+        notify_channel, and delegates the actual resume+card-processing
+        to the watcher so the logic stays in one place.
+        """
+        if not self._list_runner or not self._watcher:
+            return
+
+        paused = self._list_runner.get_paused_sessions()
+        if not paused:
+            logger.info("TrelloPlugin: no paused sessions to auto-resume")
+            return
+
+        notify_channel = self._config["notify_channel"]
+        logger.info(
+            "TrelloPlugin: auto-resuming %d paused session(s)", len(paused)
+        )
+
+        for session in paused:
+            try:
+                self._watcher.resume_list_run_session(
+                    session=session,
+                    notify_channel=notify_channel,
+                    reason="리부트 후 자동 재개",
+                )
+                logger.info(
+                    "TrelloPlugin: auto-resume scheduled: session=%s (%s)",
+                    session.session_id, session.list_name,
+                )
+            except Exception as e:
+                logger.error(
+                    "TrelloPlugin: auto-resume failed: session=%s, error=%s",
+                    session.session_id, e,
+                )
 
     async def _on_shutdown(self, ctx: HookContext) -> tuple[HookResult, Any]:
         """Stop watcher on shutdown."""
@@ -305,8 +345,6 @@ class TrelloPlugin(Plugin):
 
     async def _on_command(self, ctx: HookContext) -> tuple[HookResult, Any]:
         """Handle resume list-run command."""
-        from seosoyoung.plugin_sdk import slack
-
         command = ctx.args.get("command", "")
 
         if not _is_resume_command(command):
@@ -318,6 +356,7 @@ class TrelloPlugin(Plugin):
         channel = ctx.args.get("channel")
         ts = ctx.args.get("ts")
         thread_ts = ctx.args.get("thread_ts")
+        reply_ts = thread_ts or ts
 
         paused = self._list_runner.get_paused_sessions()
         if not paused:
@@ -325,38 +364,45 @@ class TrelloPlugin(Plugin):
                 await slack.send_message(
                     channel=channel,
                     text="현재 중단된 정주행 세션이 없습니다.",
-                    thread_ts=thread_ts or ts,
+                    thread_ts=reply_ts,
                 )
             return HookResult.STOP, None
 
         # Resume the most recent paused session
         session = paused[-1]
-        if self._list_runner.resume_run(session.session_id):
-            if channel:
-                await slack.send_message(
-                    channel=channel,
-                    text=(
-                        f"\u25b6\ufe0f 정주행 재개: "
-                        f"`{session.session_id}` ({session.list_name})\n"
-                        f"진행: {session.current_index}/{len(session.card_ids)}"
-                    ),
-                    thread_ts=thread_ts or ts,
+        notify_channel = self._config["notify_channel"]
+
+        if self._watcher:
+            try:
+                self._watcher.resume_list_run_session(
+                    session=session,
+                    notify_channel=notify_channel,
+                    reason="수동 재개 명령",
                 )
-            # Trigger watcher to process next card
-            if self._watcher:
-                notify_channel = self._config["notify_channel"]
-                t = threading.Thread(
-                    target=self._watcher._process_list_run_card,
-                    args=(session.session_id, thread_ts or ts, notify_channel),
-                    daemon=True,
-                )
-                t.start()
+                if channel:
+                    await slack.send_message(
+                        channel=channel,
+                        text=(
+                            f"\u25b6\ufe0f 정주행 재개: "
+                            f"`{session.session_id}` ({session.list_name})\n"
+                            f"진행: {session.current_index}/{len(session.card_ids)}"
+                        ),
+                        thread_ts=reply_ts,
+                    )
+            except Exception as e:
+                logger.error("resume_list_run_session failed: %s", e)
+                if channel:
+                    await slack.send_message(
+                        channel=channel,
+                        text="정주행 재개에 실패했습니다.",
+                        thread_ts=reply_ts,
+                    )
         else:
             if channel:
                 await slack.send_message(
                     channel=channel,
-                    text="정주행 재개에 실패했습니다.",
-                    thread_ts=thread_ts or ts,
+                    text="워처가 준비되지 않아 정주행을 재개할 수 없습니다.",
+                    thread_ts=reply_ts,
                 )
 
         return HookResult.STOP, None

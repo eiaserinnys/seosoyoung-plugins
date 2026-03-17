@@ -175,6 +175,106 @@ class TestTrelloOnStartup:
         assert loaded_plugin._list_runner is not None
 
 
+class TestTrelloOnStartupAutoResume:
+    """on_startup hook: auto-resume paused sessions."""
+
+    @pytest.fixture()
+    async def loaded_plugin(self):
+        p = TrelloPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+        return p
+
+    @pytest.mark.asyncio
+    async def test_no_paused_sessions_skips_resume(self, loaded_plugin):
+        """When no PAUSED sessions exist, resume_list_run_session is not called."""
+        ctx = HookContext(hook_name="on_startup", args={})
+
+        with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher") as MockWatcher:
+            mock_watcher = MagicMock()
+            MockWatcher.return_value = mock_watcher
+
+            with patch("seosoyoung_plugins.trello.list_runner.ListRunner") as MockRunner:
+                mock_runner = MagicMock()
+                mock_runner.get_paused_sessions.return_value = []
+                MockRunner.return_value = mock_runner
+
+                await loaded_plugin.register_hooks()["on_startup"](ctx)
+
+        mock_watcher.resume_list_run_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_one_paused_session_triggers_resume(self, loaded_plugin):
+        """A single PAUSED session causes resume_list_run_session to be called once."""
+        mock_session = MagicMock()
+        mock_session.session_id = "sess-abc"
+        mock_session.list_name = "Sprint 1"
+
+        ctx = HookContext(hook_name="on_startup", args={})
+
+        with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher") as MockWatcher:
+            mock_watcher = MagicMock()
+            MockWatcher.return_value = mock_watcher
+
+            with patch("seosoyoung_plugins.trello.list_runner.ListRunner") as MockRunner:
+                mock_runner = MagicMock()
+                mock_runner.get_paused_sessions.return_value = [mock_session]
+                MockRunner.return_value = mock_runner
+
+                await loaded_plugin.register_hooks()["on_startup"](ctx)
+
+        mock_watcher.resume_list_run_session.assert_called_once_with(
+            session=mock_session,
+            notify_channel=SAMPLE_CONFIG["notify_channel"],
+            reason="리부트 후 자동 재개",
+        )
+
+    @pytest.mark.asyncio
+    async def test_multiple_paused_sessions_resume_all(self, loaded_plugin):
+        """All PAUSED sessions are resumed, not just the first."""
+        sessions = [MagicMock(session_id=f"sess-{i}", list_name=f"List {i}") for i in range(3)]
+
+        ctx = HookContext(hook_name="on_startup", args={})
+
+        with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher") as MockWatcher:
+            mock_watcher = MagicMock()
+            MockWatcher.return_value = mock_watcher
+
+            with patch("seosoyoung_plugins.trello.list_runner.ListRunner") as MockRunner:
+                mock_runner = MagicMock()
+                mock_runner.get_paused_sessions.return_value = sessions
+                MockRunner.return_value = mock_runner
+
+                await loaded_plugin.register_hooks()["on_startup"](ctx)
+
+        assert mock_watcher.resume_list_run_session.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_resume_error_does_not_abort_startup(self, loaded_plugin):
+        """If resume_list_run_session raises for one session, startup still completes
+        and remaining sessions are still attempted."""
+        sessions = [MagicMock(session_id=f"sess-{i}", list_name=f"List {i}") for i in range(2)]
+
+        ctx = HookContext(hook_name="on_startup", args={})
+
+        with patch("seosoyoung_plugins.trello.watcher.TrelloWatcher") as MockWatcher:
+            mock_watcher = MagicMock()
+            # First call raises, second call succeeds
+            mock_watcher.resume_list_run_session.side_effect = [RuntimeError("oops"), None]
+            MockWatcher.return_value = mock_watcher
+
+            with patch("seosoyoung_plugins.trello.list_runner.ListRunner") as MockRunner:
+                mock_runner = MagicMock()
+                mock_runner.get_paused_sessions.return_value = sessions
+                MockRunner.return_value = mock_runner
+
+                result, value = await loaded_plugin.register_hooks()["on_startup"](ctx)
+
+        # Startup must complete normally
+        assert result == HookResult.CONTINUE
+        # Both sessions were attempted
+        assert mock_watcher.resume_list_run_session.call_count == 2
+
+
 class TestTrelloOnShutdown:
     """on_shutdown hook."""
 
@@ -367,7 +467,8 @@ class TestTrelloOnCommand:
         mock_session.current_index = 2
         mock_session.card_ids = ["a", "b", "c"]
         plugin_with_runner._list_runner.get_paused_sessions.return_value = [mock_session]
-        plugin_with_runner._list_runner.resume_run.return_value = True
+        # resume_list_run_session is now the delegation point
+        plugin_with_runner._watcher.resume_list_run_session = MagicMock()
         mock_say = MagicMock()
 
         ctx = HookContext(
@@ -380,11 +481,14 @@ class TestTrelloOnCommand:
             },
         )
         hooks = plugin_with_runner.register_hooks()
-        with patch("seosoyoung_plugins.trello.plugin.threading"):
-            result, value = await hooks["on_command"](ctx)
+        result, value = await hooks["on_command"](ctx)
 
         assert result == HookResult.STOP
-        plugin_with_runner._list_runner.resume_run.assert_called_once_with("sess-123")
+        plugin_with_runner._watcher.resume_list_run_session.assert_called_once_with(
+            session=mock_session,
+            notify_channel=SAMPLE_CONFIG["notify_channel"],
+            reason="수동 재개 명령",
+        )
 
 
 class TestIsResumeCommand:
