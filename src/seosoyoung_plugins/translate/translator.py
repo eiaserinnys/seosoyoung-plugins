@@ -140,7 +140,7 @@ MODEL_PRICING = {
     "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
     "claude-3-opus-20240229": {"input": 15.00, "output": 75.00},
     # OpenAI
-    "gpt-5-mini": {"input": 0.40, "output": 1.60},
+    "gpt-5.4-mini": {"input": 0.40, "output": 1.60},
     "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
     "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
     "gpt-4.1": {"input": 2.00, "output": 8.00},

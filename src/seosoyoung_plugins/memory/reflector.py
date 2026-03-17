@@ -95,7 +95,7 @@ def _assign_reflector_ids(raw_items: list) -> list[dict]:
 class Reflector:
     """관찰 로그를 압축하고 재구조화"""
 
-    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-4.1-mini"):
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5.4-mini"):
         self.client = soulstream_client
         self.model = model
         self.token_counter = TokenCounter()
