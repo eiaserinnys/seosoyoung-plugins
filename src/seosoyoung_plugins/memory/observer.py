@@ -147,7 +147,7 @@ def _assign_obs_ids(raw_items: list, existing: list[dict]) -> list[dict]:
 class Observer:
     """대화를 관찰하여 구조화된 관찰 로그를 생성"""
 
-    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-4.1-mini"):
+    def __init__(self, soulstream_client: SoulstreamClient, model: str = "gpt-5.4-mini"):
         self.client = soulstream_client
         self.model = model
 
