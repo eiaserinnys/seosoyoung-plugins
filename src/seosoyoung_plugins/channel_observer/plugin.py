@@ -76,6 +76,7 @@ class ChannelObserverPlugin(Plugin):
             "recent_messages_count", 5
         )
         self._periodic_sec: int = config.get("periodic_sec", 300)
+        self._intervene_model: str | None = config.get("intervene_model", None)
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
 
@@ -176,6 +177,7 @@ class ChannelObserverPlugin(Plugin):
                 llm_call=self._llm_call,
                 bot_user_id=self._bot_user_id,
                 recent_messages_count=self._recent_messages_count,
+                intervene_model=self._intervene_model,
             )
             self._scheduler.start()
 
@@ -347,6 +349,7 @@ class ChannelObserverPlugin(Plugin):
                             llm_call=self._llm_call,
                             bot_user_id=self._bot_user_id,
                             recent_messages_count=self._recent_messages_count,
+                            intervene_model=self._intervene_model,
                         )
                     )
                 finally:

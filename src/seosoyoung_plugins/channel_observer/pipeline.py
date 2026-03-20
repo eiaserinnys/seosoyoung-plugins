@@ -278,6 +278,7 @@ async def run_channel_pipeline(
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
     recent_messages_count: int = 5,
+    intervene_model: str | None = None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -460,6 +461,7 @@ async def run_channel_pipeline(
                 mention_handled_ts=mention_handled_ts,
                 dispatch=kwargs.get("dispatch"),
                 recent_messages_count=recent_messages_count,
+                intervene_model=intervene_model,
             )
         else:
             # 하위호환: 단일 판단 경로
@@ -480,6 +482,7 @@ async def run_channel_pipeline(
                 mention_handled_ts=mention_handled_ts,
                 dispatch=kwargs.get("dispatch"),
                 recent_messages_count=recent_messages_count,
+                intervene_model=intervene_model,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
@@ -501,6 +504,7 @@ async def _handle_multi_judge(
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
     recent_messages_count: int = 5,
+    intervene_model: str | None = None,
     **kwargs,
 ) -> None:
     """복수 JudgeItem 처리: 이모지 일괄 + 개입 확률 판단"""
@@ -588,6 +592,7 @@ async def _handle_multi_judge(
                             dispatch=kwargs.get("dispatch"),
                             session_manager=session_manager,
                             recent_messages_count=recent_messages_count,
+                            intervene_model=intervene_model,
                         )
                     else:
                         await execute_interventions(channel_id, [action])
@@ -622,6 +627,7 @@ async def _handle_single_judge(
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
     recent_messages_count: int = 5,
+    intervene_model: str | None = None,
     **kwargs,
 ) -> None:
     """하위호환: 단일 JudgeResult 처리"""
@@ -718,6 +724,7 @@ async def _handle_single_judge(
                             dispatch=kwargs.get("dispatch"),
                             session_manager=session_manager,
                             recent_messages_count=recent_messages_count,
+                            intervene_model=intervene_model,
                         )
                 else:
                     await execute_interventions(channel_id, message_actions)
@@ -750,6 +757,7 @@ async def _execute_intervene(
     bot_user_id: str | None = None,
     thread_buffers: dict[str, list[dict]] | None = None,
     recent_messages_count: int = 5,
+    intervene_model: str | None = None,
     **kwargs,
 ) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
@@ -872,6 +880,7 @@ async def _execute_intervene(
             thread_ts=run_thread_ts,
             text_only=True,
             context=context_items,
+            model=intervene_model,
         )
         if result.ok:
             response_text = result.output
