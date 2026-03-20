@@ -829,8 +829,19 @@ async def _execute_intervene(
         else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
     )
 
-    # trigger_message 텍스트를 prompt로, 나머지를 context_items로 분리
-    prompt = trigger_message.get("text", "") if trigger_message else ""
+    # recent_messages + trigger_message 를 [화자]: 메시지 형식으로 포맷하여 prompt로 사용
+    # 화자 정보 포함 대화 이력 전체를 전달하여 Claude가 맥락을 파악하고 자연스럽게 끼어들도록 함
+    conversation_lines = []
+    for m in recent_messages:
+        user = m.get("user", "unknown")
+        text = m.get("text", "")
+        conversation_lines.append(f"[{user}]: {text}")
+    if trigger_message:
+        user = trigger_message.get("user", "unknown")
+        text = trigger_message.get("text", "")
+        conversation_lines.append(f"[{user}]: {text}")
+    prompt = "\n".join(conversation_lines)
+
     context_items = [
         {
             "key": "system_prompt",
@@ -841,18 +852,6 @@ async def _execute_intervene(
             "key": "channel_digest",
             "label": "채널 요약",
             "content": digest if digest else "",
-        },
-        {
-            "key": "recent_messages",
-            "label": "최근 메시지",
-            "content": [
-                {
-                    "user": m.get("user", ""),
-                    "text": m.get("text", ""),
-                    "ts": m.get("ts", ""),
-                }
-                for m in recent_messages
-            ],
         },
         {
             "key": "thread_context",
