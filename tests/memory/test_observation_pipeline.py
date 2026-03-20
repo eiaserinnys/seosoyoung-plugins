@@ -535,13 +535,15 @@ class TestSendDebugLogThreadTs:
 
     def test_send_debug_log_without_thread_ts(self):
         """thread_ts 없이 호출하면 thread_ts가 kwargs에 포함되지 않음"""
+        import sys
         from seosoyoung_plugins.memory.observation_pipeline import _send_debug_log
 
-        with patch("slack_sdk.WebClient") as MockClient:
-            mock_instance = MagicMock()
-            mock_instance.chat_postMessage.return_value = {"ts": "1234.5678"}
-            MockClient.return_value = mock_instance
+        mock_instance = MagicMock()
+        mock_instance.chat_postMessage.return_value = {"ts": "1234.5678"}
+        mock_sdk = MagicMock()
+        mock_sdk.WebClient.return_value = mock_instance
 
+        with patch.dict(sys.modules, {"slack_sdk": mock_sdk}):
             result = _send_debug_log("C_DEBUG", "테스트 메시지", bot_token="xoxb-test")
 
         assert result == "1234.5678"
@@ -550,13 +552,15 @@ class TestSendDebugLogThreadTs:
 
     def test_send_debug_log_with_thread_ts(self):
         """thread_ts가 있으면 kwargs에 포함됨"""
+        import sys
         from seosoyoung_plugins.memory.observation_pipeline import _send_debug_log
 
-        with patch("slack_sdk.WebClient") as MockClient:
-            mock_instance = MagicMock()
-            mock_instance.chat_postMessage.return_value = {"ts": "9999.0001"}
-            MockClient.return_value = mock_instance
+        mock_instance = MagicMock()
+        mock_instance.chat_postMessage.return_value = {"ts": "9999.0001"}
+        mock_sdk = MagicMock()
+        mock_sdk.WebClient.return_value = mock_instance
 
+        with patch.dict(sys.modules, {"slack_sdk": mock_sdk}):
             result = _send_debug_log("C_DEBUG", "스레드 메시지", thread_ts="1234.5678", bot_token="xoxb-test")
 
         assert result == "9999.0001"
@@ -565,13 +569,15 @@ class TestSendDebugLogThreadTs:
 
     def test_send_debug_log_empty_thread_ts_not_included(self):
         """thread_ts가 빈 문자열이면 kwargs에 포함되지 않음"""
+        import sys
         from seosoyoung_plugins.memory.observation_pipeline import _send_debug_log
 
-        with patch("slack_sdk.WebClient") as MockClient:
-            mock_instance = MagicMock()
-            mock_instance.chat_postMessage.return_value = {"ts": "1234.5678"}
-            MockClient.return_value = mock_instance
+        mock_instance = MagicMock()
+        mock_instance.chat_postMessage.return_value = {"ts": "1234.5678"}
+        mock_sdk = MagicMock()
+        mock_sdk.WebClient.return_value = mock_instance
 
+        with patch.dict(sys.modules, {"slack_sdk": mock_sdk}):
             _send_debug_log("C_DEBUG", "메시지", thread_ts="", bot_token="xoxb-test")
 
         call_kwargs = mock_instance.chat_postMessage.call_args.kwargs
