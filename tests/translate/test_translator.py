@@ -329,7 +329,7 @@ class TestTranslateSoulstream:
         assert call_args.kwargs["provider"] == "anthropic"
 
     def test_translate_uses_max_tokens(self):
-        """소울스트림 호출 시 max_tokens=2048 사용"""
+        """소울스트림 호출 시 max_tokens=16384 사용"""
         mock_client = self._make_mock_client("Hello")
 
         translate(
@@ -341,7 +341,7 @@ class TestTranslateSoulstream:
         )
 
         call_args = mock_client.complete.call_args
-        assert call_args.kwargs["max_tokens"] == 2048
+        assert call_args.kwargs["max_tokens"] == 16384
 
     def test_translate_custom_model(self):
         """커스텀 모델 사용"""
