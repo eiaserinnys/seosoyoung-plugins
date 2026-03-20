@@ -191,6 +191,9 @@ class TestFindRelevantTerms:
     @patch("seosoyoung_plugins.translate.glossary._extract_korean_words")
     def test_fuzzy_match_typo(self, mock_extract, mock_entries, mock_index):
         """오타가 있는 용어 퍼지 매칭"""
+        import sys
+        from unittest.mock import MagicMock
+
         mock_entries.return_value = (
             ("아리엘라", "Ariella"),
             ("펜릭스 헤이븐", "Fenrix Haven"),
@@ -201,9 +204,16 @@ class TestFindRelevantTerms:
         )
         mock_extract.return_value = ["아리엘나"]  # 오타 (4자 중 1자 다름 = 75%)
 
+        # rapidfuzz가 없을 수 있으므로 mock으로 주입
+        mock_fuzz = MagicMock()
+        mock_fuzz.ratio = lambda a, b: int(100 * (1 - sum(c1 != c2 for c1, c2 in zip(a, b)) / max(len(a), len(b))))
+        mock_rapidfuzz = MagicMock()
+        mock_rapidfuzz.fuzz = mock_fuzz
+
         text = "아리엘나가 말했다."
         # 75% 유사도이므로 70% 임계값 사용
-        result = find_relevant_terms(text, "ko", fuzzy_threshold=70, glossary_path="")
+        with patch.dict(sys.modules, {"rapidfuzz": mock_rapidfuzz, "rapidfuzz.fuzz": mock_fuzz}):
+            result = find_relevant_terms(text, "ko", fuzzy_threshold=70, glossary_path="")
 
         # 퍼지 매칭으로 유사한 용어 찾아야 함
         assert len(result) >= 1
@@ -214,12 +224,22 @@ class TestFindRelevantTerms:
     @patch("seosoyoung_plugins.translate.glossary._extract_english_words")
     def test_fuzzy_match_english_typo(self, mock_extract, mock_entries, mock_index):
         """영어 오타 퍼지 매칭"""
+        import sys
+        from unittest.mock import MagicMock
+
         mock_entries.return_value = (("아리엘라", "Ariella"),)
         mock_index.return_value = ({"아리엘라": [0]}, {"ariella": [0]})
         mock_extract.return_value = ["Ariela"]  # 오타
 
+        # rapidfuzz가 없을 수 있으므로 mock으로 주입
+        mock_fuzz = MagicMock()
+        mock_fuzz.ratio = lambda a, b: int(100 * (1 - sum(c1 != c2 for c1, c2 in zip(a, b)) / max(len(a), len(b))))
+        mock_rapidfuzz = MagicMock()
+        mock_rapidfuzz.fuzz = mock_fuzz
+
         text = "Ariela spoke quietly."
-        result = find_relevant_terms(text, "en", fuzzy_threshold=80, glossary_path="")
+        with patch.dict(sys.modules, {"rapidfuzz": mock_rapidfuzz, "rapidfuzz.fuzz": mock_fuzz}):
+            result = find_relevant_terms(text, "en", fuzzy_threshold=80, glossary_path="")
 
         assert len(result) >= 1
         assert ("Ariella", "아리엘라") in result
@@ -229,6 +249,9 @@ class TestFindRelevantTerms:
     @patch("seosoyoung_plugins.translate.glossary._extract_korean_words")
     def test_fuzzy_match_partial_name(self, mock_extract, mock_entries, mock_index):
         """부분 이름 퍼지 매칭"""
+        import sys
+        from unittest.mock import MagicMock
+
         mock_entries.return_value = (("망각의 성채", "The Sanctuary of Oblivion"),)
         mock_index.return_value = (
             {"망각의 성채": [0], "망각의": [0], "성채": [0]},
@@ -236,8 +259,15 @@ class TestFindRelevantTerms:
         )
         mock_extract.return_value = ["망각의성채"]  # 띄어쓰기 없음
 
+        # rapidfuzz가 없을 수 있으므로 mock으로 주입
+        mock_fuzz = MagicMock()
+        mock_fuzz.ratio = lambda a, b: int(100 * (1 - sum(c1 != c2 for c1, c2 in zip(a, b)) / max(len(a), len(b))))
+        mock_rapidfuzz = MagicMock()
+        mock_rapidfuzz.fuzz = mock_fuzz
+
         text = "망각의성채로 돌아갔다."
-        result = find_relevant_terms(text, "ko", fuzzy_threshold=80, glossary_path="")
+        with patch.dict(sys.modules, {"rapidfuzz": mock_rapidfuzz, "rapidfuzz.fuzz": mock_fuzz}):
+            result = find_relevant_terms(text, "ko", fuzzy_threshold=80, glossary_path="")
 
         # 퍼지 매칭으로 찾아야 함
         assert len(result) >= 1
