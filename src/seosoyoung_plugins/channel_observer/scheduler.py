@@ -42,6 +42,7 @@ class ChannelDigestScheduler:
         bot_user_id: str = "",
         recent_messages_count: int = 5,
         intervene_model: str | None = None,
+        folder_id: str | None = None,
         **kwargs,
     ):
         self.store = store
@@ -59,6 +60,7 @@ class ChannelDigestScheduler:
         self.bot_user_id = bot_user_id
         self.recent_messages_count = recent_messages_count
         self.intervene_model = intervene_model
+        self.folder_id = folder_id
 
         self._timer: threading.Timer | None = None
         self._running = False
@@ -143,6 +145,7 @@ class ChannelDigestScheduler:
                     bot_user_id=self.bot_user_id,
                     recent_messages_count=self.recent_messages_count,
                     intervene_model=self.intervene_model,
+                    folder_id=self.folder_id,
                 )
             )
         except Exception as e:
