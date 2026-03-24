@@ -866,11 +866,12 @@ async def _execute_intervene(
             "label": "스레드 맥락",
             "content": _format_thread_buffers(thread_buffers),
         },
-        {
-            "key": "observer_reason",
-            "label": "관찰자 판단 근거",
-            "content": observer_reason or "",
-        },
+        # NOTE: "관찰자 판단 근거" 섹션을 비활성화 — 자연스러운 대화 개입에 방해가 된다고 판단
+        # {
+        #     "key": "observer_reason",
+        #     "label": "관찰자 판단 근거",
+        #     "content": observer_reason or "",
+        # },
     ]
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
