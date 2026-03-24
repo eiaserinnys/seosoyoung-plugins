@@ -864,13 +864,7 @@ async def _execute_intervene(
         {
             "key": "thread_context",
             "label": "스레드 맥락",
-            "content": {
-                tid: [
-                    {"user": m.get("user", ""), "text": m.get("text", "")}
-                    for m in msgs
-                ]
-                for tid, msgs in (thread_buffers or {}).items()
-            },
+            "content": _format_thread_buffers(thread_buffers),
         },
         {
             "key": "observer_reason",
@@ -971,6 +965,30 @@ async def _execute_intervene(
     except Exception as e:
         logger.error(f"intervene 슬랙 발송 실패 ({channel_id}): {e}")
         await _remove_thinking_reaction(channel_id, reaction_ts)
+
+
+def _format_thread_buffers(thread_buffers: dict | None) -> str:
+    """thread_buffers를 사람이 읽기 좋은 텍스트로 변환합니다.
+
+    dict[str, list[dict]] 구조를 스레드별 대화 블록으로 포맷합니다.
+    빈 buffers이면 빈 문자열을 반환합니다.
+
+    예시 출력:
+        [1774317667.361259]
+          user1: 안녕하세요
+          user2: 반갑습니다
+    """
+    if not thread_buffers:
+        return ""
+    blocks = []
+    for tid, msgs in thread_buffers.items():
+        lines = [f"[{tid}]"]
+        for m in msgs:
+            user = m.get("user", "")
+            text = m.get("text", "")
+            lines.append(f"  {user}: {text}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 async def _remove_thinking_reaction(channel_id: str, ts: str | None) -> None:
