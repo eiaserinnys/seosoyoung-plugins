@@ -864,7 +864,7 @@ async def _execute_intervene(
         {
             "key": "thread_context",
             "label": "스레드 맥락",
-            "content": _format_thread_buffers(thread_buffers),
+            "content": await _fetch_recent_context(channel_id),
         },
         # NOTE: "관찰자 판단 근거" 섹션을 비활성화 — 자연스러운 대화 개입에 방해가 된다고 판단
         # {
@@ -968,6 +968,43 @@ async def _execute_intervene(
         await _remove_thinking_reaction(channel_id, reaction_ts)
 
 
+async def _fetch_recent_context(channel_id: str, count: int = 15) -> str:
+    """슬랙 API로 채널의 최근 메시지를 가져와 포맷합니다.
+
+    API 호출 실패 시 빈 문자열을 반환합니다.
+    """
+    try:
+        history = await slack.get_channel_history(channel_id, limit=count)
+        # Slack API는 최신순 반환 → 시간순으로 뒤집기
+        messages = [
+            {"user": m.user or "unknown", "text": m.text or ""}
+            for m in reversed(history)
+        ]
+        return _format_recent_context(messages)
+    except Exception as e:
+        logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
+        return ""
+
+
+def _format_recent_context(messages: list[dict]) -> str:
+    """메시지 리스트를 [user]: text 형식의 텍스트로 변환합니다.
+
+    채널 개입 세션의 '스레드 맥락'에 최근 대화 흐름을 제공하기 위해 사용합니다.
+    잘라내기(truncation)는 호출자가 담당합니다.
+    """
+    if not messages:
+        return ""
+    lines = []
+    for m in messages:
+        user = m.get("user", "unknown")
+        text = m.get("text", "")
+        lines.append(f"[{user}]: {text}")
+    return "\n".join(lines)
+
+
+# TODO: _format_thread_buffers는 _execute_intervene의 thread_context에서 더 이상 사용하지 않음.
+#       트리거 메시지 검색(L806)에서 thread_buffers를 여전히 참조하므로 파라미터는 유지.
+#       향후 트리거 검색 로직 리팩토링 시 함께 제거 검토.
 def _format_thread_buffers(thread_buffers: dict | None) -> str:
     """thread_buffers를 사람이 읽기 좋은 텍스트로 변환합니다.
 

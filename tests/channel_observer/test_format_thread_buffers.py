@@ -1,13 +1,20 @@
-"""Tests for _format_thread_buffers helper in pipeline.py.
+"""Tests for _format_thread_buffers, _format_recent_context, _fetch_recent_context.
 
 Verifies that thread_buffers dict[str, list[dict]] is serialized to a
 human-readable string instead of a raw nested structure that would render
 as [object Object] in UI or confuse Claude Code prompt context.
 """
 
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
-from seosoyoung_plugins.channel_observer.pipeline import _format_thread_buffers
+from seosoyoung_plugins.channel_observer.pipeline import (
+    _fetch_recent_context,
+    _format_recent_context,
+    _format_thread_buffers,
+)
 
 
 class TestFormatThreadBuffers:
@@ -69,3 +76,93 @@ class TestFormatThreadBuffers:
         assert "[object Object]" not in result
         assert "U_BOT: 반갑습니다" in result
         assert "U_USR: 안녕하세요" in result
+
+
+class TestFormatRecentContext:
+    """_format_recent_context 테스트."""
+
+    def test_empty_list_returns_empty_string(self):
+        assert _format_recent_context([]) == ""
+
+    def test_formats_user_and_text(self):
+        messages = [{"user": "U001", "text": "안녕하세요"}]
+        result = _format_recent_context(messages)
+        assert "[U001]: 안녕하세요" in result
+
+    def test_multiple_messages(self):
+        messages = [
+            {"user": "U001", "text": "첫 번째"},
+            {"user": "U002", "text": "두 번째"},
+        ]
+        result = _format_recent_context(messages)
+        assert "[U001]: 첫 번째" in result
+        assert "[U002]: 두 번째" in result
+
+    def test_all_messages_included(self):
+        """truncation 없이 전달된 메시지를 모두 포맷한다."""
+        messages = [{"user": f"U{i:03d}", "text": f"msg{i}"} for i in range(20)]
+        result = _format_recent_context(messages)
+        lines = [line for line in result.split("\n") if line.strip()]
+        assert len(lines) == 20
+
+    def test_missing_keys(self):
+        messages = [{}]
+        result = _format_recent_context(messages)
+        assert "[unknown]:" in result
+
+
+@dataclass
+class FakeMessage:
+    """slack.get_channel_history가 반환하는 Message 모방."""
+    ts: str = ""
+    text: str = ""
+    user: str = ""
+    thread_ts: str | None = None
+    channel: str = ""
+
+
+class TestFetchRecentContext:
+    """_fetch_recent_context 비동기 테스트."""
+
+    @pytest.fixture
+    def mock_slack(self):
+        """slack 모듈의 get_channel_history를 mock."""
+        with patch(
+            "seosoyoung_plugins.channel_observer.pipeline.slack"
+        ) as mock:
+            mock.get_channel_history = AsyncMock()
+            yield mock
+
+    async def test_normal_returns_formatted(self, mock_slack):
+        mock_slack.get_channel_history.return_value = [
+            FakeMessage(ts="3", text="newest", user="U003"),
+            FakeMessage(ts="2", text="middle", user="U002"),
+            FakeMessage(ts="1", text="oldest", user="U001"),
+        ]
+        result = await _fetch_recent_context("C123", count=15)
+        lines = result.strip().split("\n")
+        # reversed → 시간순 (oldest first)
+        assert "[U001]: oldest" in lines[0]
+        assert "[U003]: newest" in lines[2]
+
+    async def test_api_failure_returns_empty(self, mock_slack):
+        mock_slack.get_channel_history.side_effect = Exception("API error")
+        result = await _fetch_recent_context("C123")
+        assert result == ""
+
+    async def test_empty_channel_returns_empty(self, mock_slack):
+        mock_slack.get_channel_history.return_value = []
+        result = await _fetch_recent_context("C123")
+        assert result == ""
+
+    async def test_passes_count_as_limit(self, mock_slack):
+        mock_slack.get_channel_history.return_value = []
+        await _fetch_recent_context("C123", count=10)
+        mock_slack.get_channel_history.assert_called_once_with("C123", limit=10)
+
+    async def test_none_user_becomes_unknown(self, mock_slack):
+        mock_slack.get_channel_history.return_value = [
+            FakeMessage(ts="1", text="hello", user=None),
+        ]
+        result = await _fetch_recent_context("C123")
+        assert "[unknown]: hello" in result
