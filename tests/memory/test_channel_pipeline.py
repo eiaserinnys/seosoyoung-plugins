@@ -1577,8 +1577,9 @@ class TestInterveneRecentMessagesFromJudged:
         # context에는 recent_messages 키가 없어야 함
         context = call_kwargs["context"]
         assert not any(item["key"] == "recent_messages" for item in context)
-        # observer_reason은 context에 그대로 포함
-        assert any(item["key"] == "observer_reason" for item in context)
+        # observer_reason은 의도적으로 비활성화됨 (pipeline.py L869-874 참조)
+        # 자연스러운 대화 개입에 방해가 된다는 판단으로 context에서 제거된 상태
+        assert not any(item["key"] == "observer_reason" for item in context)
 
     @pytest.mark.asyncio
     async def test_combined_judged_pending_context(self, store, channel_id, mock_plugin_sdk):

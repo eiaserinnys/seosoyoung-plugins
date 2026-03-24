@@ -864,7 +864,7 @@ async def _execute_intervene(
         {
             "key": "thread_context",
             "label": "스레드 맥락",
-            "content": await _fetch_recent_context(channel_id),
+            "content": await _fetch_recent_context(channel_id, bot_user_id=bot_user_id),
         },
         # NOTE: "관찰자 판단 근거" 섹션을 비활성화 — 자연스러운 대화 개입에 방해가 된다고 판단
         # {
@@ -968,7 +968,11 @@ async def _execute_intervene(
         await _remove_thinking_reaction(channel_id, reaction_ts)
 
 
-async def _fetch_recent_context(channel_id: str, count: int = 15) -> str:
+async def _fetch_recent_context(
+    channel_id: str,
+    count: int = 15,
+    bot_user_id: str | None = None,
+) -> str:
     """슬랙 API로 채널의 최근 메시지를 가져와 포맷합니다.
 
     API 호출 실패 시 빈 문자열을 반환합니다.
@@ -980,25 +984,35 @@ async def _fetch_recent_context(channel_id: str, count: int = 15) -> str:
             {"user": m.user or "unknown", "text": m.text or ""}
             for m in reversed(history)
         ]
-        return _format_recent_context(messages)
+        return _format_recent_context(messages, bot_user_id=bot_user_id)
     except Exception as e:
         logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
         return ""
 
 
-def _format_recent_context(messages: list[dict]) -> str:
+def _format_recent_context(
+    messages: list[dict],
+    bot_user_id: str | None = None,
+) -> str:
     """메시지 리스트를 [user]: text 형식의 텍스트로 변환합니다.
 
     채널 개입 세션의 '스레드 맥락'에 최근 대화 흐름을 제공하기 위해 사용합니다.
     잘라내기(truncation)는 호출자가 담당합니다.
+
+    bot_user_id가 주어지면 해당 봇을 @멘션하는 루트 메시지에 [BOT MENTION THREAD] 태그를
+    삽입하여, 개입 세션이 이미 멘션 핸들러가 처리 중인 스레드에 중복 답변하지 않도록 한다.
+    이 함수는 get_channel_history(채널 루트만 반환)의 결과를 받으므로
+    스레드 중간 메시지는 이미 제외된 상태다. 별도 thread_ts 필터는 불필요하다.
     """
     if not messages:
         return ""
+    mention_pattern = f"<@{bot_user_id}>" if bot_user_id else None
     lines = []
     for m in messages:
         user = m.get("user", "unknown")
         text = m.get("text", "")
-        lines.append(f"[{user}]: {text}")
+        tag = " [BOT MENTION THREAD]" if (mention_pattern and mention_pattern in text) else ""
+        lines.append(f"[{user}]: {text}{tag}")
     return "\n".join(lines)
 
 
