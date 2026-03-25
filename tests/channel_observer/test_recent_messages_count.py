@@ -121,8 +121,10 @@ class TestPluginConfigRecentMessagesCount:
 class TestExecuteInterveneRecentMessagesSlicing:
     """_execute_intervene uses recent_messages_count for slicing.
 
-    새 방식: recent_messages + trigger_message를 [화자]: 메시지 형식으로 합쳐 prompt로 전달.
-    context에 recent_messages 키가 없고, prompt 줄 수로 슬라이싱 크기를 검증한다.
+    prompt은 고정 문자열 "(채널 개입 트리거)"를 사용하며, 슬라이싱 결과는
+    thread_context(_fetch_recent_context 경유)를 통해 전달된다.
+    context에 recent_messages 키가 없음을 검증하고,
+    prompt이 고정 문자열임을 확인한다.
     """
 
     def _make_pending(self, n: int) -> list[dict]:
@@ -132,13 +134,9 @@ class TestExecuteInterveneRecentMessagesSlicing:
             for i in range(n)
         ]
 
-    def _count_conversation_lines(self, prompt: str) -> int:
-        """prompt에서 [화자]: 형식의 대화 줄 수를 센다."""
-        return sum(1 for line in prompt.splitlines() if line.strip().startswith("["))
-
     @pytest.mark.asyncio
     async def test_pending_search_uses_count(self):
-        """When trigger found in pending, slice [max(0, i-N):i] uses N. prompt에 N+1줄(recent N + trigger 1)."""
+        """When trigger found in pending, prompt은 고정 문자열, context에 recent_messages 키 없음."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
@@ -169,17 +167,14 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=10,
             )
 
-            # prompt = [화자]: 메시지 형식, index 15, count 10 → recent [5:15] + trigger = 11줄
             call_kwargs = mock_soul.run.call_args.kwargs
-            prompt = call_kwargs["prompt"]
-            assert self._count_conversation_lines(prompt) == 11  # 10 recent + 1 trigger
-            # context에 recent_messages 키 없음
+            assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)
 
     @pytest.mark.asyncio
     async def test_thread_buffer_fallback_uses_count(self):
-        """When trigger found in thread_buffers, last N pending used. prompt에 N+1줄."""
+        """When trigger found in thread_buffers, prompt은 고정 문자열, context에 recent_messages 키 없음."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
@@ -212,20 +207,17 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=8,
             )
 
-            # prompt = recent 8줄 + trigger(thread_msg) 1줄 = 9줄
             call_kwargs = mock_soul.run.call_args.kwargs
-            prompt = call_kwargs["prompt"]
-            assert self._count_conversation_lines(prompt) == 9  # 8 recent + 1 trigger
+            assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)
 
     @pytest.mark.asyncio
     async def test_judged_fallback_uses_count(self):
-        """When trigger found in judged, slice [i-N:i] uses N messages before trigger. prompt에 N+1줄."""
+        """When trigger found in judged, prompt은 고정 문자열, context에 recent_messages 키 없음."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
-        # 15 judged messages — trigger at index 13 → 12 prior messages
         judged_msgs = [
             {"ts": f"j{i:02d}.000000", "text": f"judged {i}", "user": f"UJ{i}"}
             for i in range(15)
@@ -247,7 +239,7 @@ class TestExecuteInterveneRecentMessagesSlicing:
 
             store = MagicMock()
             store.get_digest.return_value = None
-            store.load_judged.return_value = judged_msgs  # trigger at index 13
+            store.load_judged.return_value = judged_msgs
 
             await _execute_intervene(
                 store=store,
@@ -257,18 +249,14 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=12,
             )
 
-            # all_context = judged_msgs + pending, trigger at index 13
-            # recent = all_context[max(0, 13-12):13] = all_context[1:13] = 12 messages
-            # prompt = 12 recent + 1 trigger = 13줄
             call_kwargs = mock_soul.run.call_args.kwargs
-            prompt = call_kwargs["prompt"]
-            assert self._count_conversation_lines(prompt) == 13  # 12 recent + 1 trigger
+            assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)
 
     @pytest.mark.asyncio
     async def test_channel_target_uses_count(self):
-        """When target is 'channel', last N pending used (excluding trigger). prompt에 N+1줄."""
+        """When target is 'channel', prompt은 고정 문자열, context에 recent_messages 키 없음."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
@@ -298,17 +286,14 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 recent_messages_count=10,
             )
 
-            # channel target: trigger = all_context[-1], recent = all_context[-11:-1] (10개)
-            # prompt = 10 recent + 1 trigger = 11줄
             call_kwargs = mock_soul.run.call_args.kwargs
-            prompt = call_kwargs["prompt"]
-            assert self._count_conversation_lines(prompt) == 11  # 10 recent + 1 trigger
+            assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)
 
     @pytest.mark.asyncio
     async def test_default_count_is_5(self):
-        """Without explicit count, defaults to 5 (backward compatible). prompt에 6줄(5+1)."""
+        """Without explicit count, defaults to 5 (backward compatible). prompt은 고정 문자열."""
         from seosoyoung_plugins.channel_observer.pipeline import _execute_intervene
         from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 
@@ -338,9 +323,7 @@ class TestExecuteInterveneRecentMessagesSlicing:
                 # no recent_messages_count -> default 5
             )
 
-            # default 5 recent + 1 trigger = 6줄
             call_kwargs = mock_soul.run.call_args.kwargs
-            prompt = call_kwargs["prompt"]
-            assert self._count_conversation_lines(prompt) == 6  # 5 recent + 1 trigger
+            assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)

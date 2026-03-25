@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from seosoyoung.plugin_sdk import mention, slack, soulstream
+from seosoyoung.plugin_sdk.slack import Message
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
     InterventionHistory,
@@ -837,18 +838,7 @@ async def _execute_intervene(
         else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
     )
 
-    # recent_messages + trigger_message 를 [화자]: 메시지 형식으로 포맷하여 prompt로 사용
-    # 화자 정보 포함 대화 이력 전체를 전달하여 Claude가 맥락을 파악하고 자연스럽게 끼어들도록 함
-    conversation_lines = []
-    for m in recent_messages:
-        user = m.get("user", "unknown")
-        text = m.get("text", "")
-        conversation_lines.append(f"[{user}]: {text}")
-    if trigger_message:
-        user = trigger_message.get("user", "unknown")
-        text = trigger_message.get("text", "")
-        conversation_lines.append(f"[{user}]: {text}")
-    prompt = "\n".join(conversation_lines)
+    prompt = "(채널 개입 트리거)"
 
     context_items = [
         {
@@ -980,10 +970,7 @@ async def _fetch_recent_context(
     try:
         history = await slack.get_channel_history(channel_id, limit=count)
         # Slack API는 최신순 반환 → 시간순으로 뒤집기
-        messages = [
-            {"user": m.user or "unknown", "text": m.text or ""}
-            for m in reversed(history)
-        ]
+        messages = list(reversed(history))  # list[Message] 그대로 전달 (rich 필드 보존)
         return _format_recent_context(messages, bot_user_id=bot_user_id)
     except Exception as e:
         logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
@@ -991,7 +978,7 @@ async def _fetch_recent_context(
 
 
 def _format_recent_context(
-    messages: list[dict],
+    messages: list[Message],
     bot_user_id: str | None = None,
 ) -> str:
     """메시지 리스트를 [user]: text 형식의 텍스트로 변환합니다.
@@ -1003,16 +990,35 @@ def _format_recent_context(
     삽입하여, 개입 세션이 이미 멘션 핸들러가 처리 중인 스레드에 중복 답변하지 않도록 한다.
     이 함수는 get_channel_history(채널 루트만 반환)의 결과를 받으므로
     스레드 중간 메시지는 이미 제외된 상태다. 별도 thread_ts 필터는 불필요하다.
+
+    reactions, files, blocks 등 rich 필드가 있으면 들여쓰기 보조 줄로 추가합니다.
     """
     if not messages:
         return ""
     mention_pattern = f"<@{bot_user_id}>" if bot_user_id else None
     lines = []
     for m in messages:
-        user = m.get("user", "unknown")
-        text = m.get("text", "")
-        tag = " [BOT MENTION THREAD]" if (mention_pattern and mention_pattern in text) else ""
-        lines.append(f"[{user}]: {text}{tag}")
+        tag = " [BOT MENTION THREAD]" if (mention_pattern and mention_pattern in (m.text or "")) else ""
+        line = f"[{m.user or 'unknown'}]: {m.text or ''}{tag}"
+
+        # Rich data (없으면 생략)
+        rich_parts = []
+        if m.reactions:
+            reaction_strs = [
+                f":{r.name}: ×{r.count} (눌린 사람: {', '.join(r.users)})"
+                for r in m.reactions
+            ]
+            rich_parts.append("리액션: " + " / ".join(reaction_strs))
+        if m.files:
+            file_strs = [f"{f.title or f.name} ({f.mimetype})" for f in m.files]
+            rich_parts.append("첨부: " + ", ".join(file_strs))
+        if m.blocks:
+            rich_parts.append("[블록 포함]")
+
+        if rich_parts:
+            line += "\n  → " + " | ".join(rich_parts)
+
+        lines.append(line)
     return "\n".join(lines)
 
 

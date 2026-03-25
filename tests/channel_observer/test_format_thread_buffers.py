@@ -5,11 +5,12 @@ human-readable string instead of a raw nested structure that would render
 as [object Object] in UI or confuse Claude Code prompt context.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from seosoyoung.plugin_sdk.slack import Message
 from seosoyoung_plugins.channel_observer.pipeline import (
     _fetch_recent_context,
     _format_recent_context,
@@ -85,14 +86,14 @@ class TestFormatRecentContext:
         assert _format_recent_context([]) == ""
 
     def test_formats_user_and_text(self):
-        messages = [{"user": "U001", "text": "안녕하세요"}]
+        messages = [Message(ts="1000.0", text="안녕하세요", user="U001")]
         result = _format_recent_context(messages)
         assert "[U001]: 안녕하세요" in result
 
     def test_multiple_messages(self):
         messages = [
-            {"user": "U001", "text": "첫 번째"},
-            {"user": "U002", "text": "두 번째"},
+            Message(ts="1000.0", text="첫 번째", user="U001"),
+            Message(ts="1001.0", text="두 번째", user="U002"),
         ]
         result = _format_recent_context(messages)
         assert "[U001]: 첫 번째" in result
@@ -100,13 +101,13 @@ class TestFormatRecentContext:
 
     def test_all_messages_included(self):
         """truncation 없이 전달된 메시지를 모두 포맷한다."""
-        messages = [{"user": f"U{i:03d}", "text": f"msg{i}"} for i in range(20)]
+        messages = [Message(ts=f"{i}.0", text=f"msg{i}", user=f"U{i:03d}") for i in range(20)]
         result = _format_recent_context(messages)
-        lines = [line for line in result.split("\n") if line.strip()]
+        lines = [line for line in result.split("\n") if line.strip() and line.strip().startswith("[")]
         assert len(lines) == 20
 
-    def test_missing_keys(self):
-        messages = [{}]
+    def test_missing_user_becomes_unknown(self):
+        messages = [Message(ts="1000.0", text="내용")]
         result = _format_recent_context(messages)
         assert "[unknown]:" in result
 
@@ -119,6 +120,9 @@ class FakeMessage:
     user: str = ""
     thread_ts: str | None = None
     channel: str = ""
+    reactions: list = field(default_factory=list)
+    files: list = field(default_factory=list)
+    blocks: list = field(default_factory=list)
 
 
 class TestFetchRecentContext:

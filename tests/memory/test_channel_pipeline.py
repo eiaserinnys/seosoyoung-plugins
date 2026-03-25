@@ -1531,15 +1531,17 @@ class TestPipelineBurstCooldown:
 
 
 class TestInterveneRecentMessagesFromJudged:
-    """_execute_intervene의 prompt가 대화 이력(화자 포함)으로 구성되는지 검증"""
+    """_execute_intervene의 prompt와 context 구성을 검증
+
+    prompt는 고정 문자열 "(채널 개입 트리거)"를 사용하며,
+    대화 이력은 thread_context(_fetch_recent_context 경유)를 통해 전달된다.
+    """
 
     @pytest.mark.asyncio
     async def test_trigger_at_pending_start_uses_judged(self, store, channel_id, mock_plugin_sdk):
-        """pending에 트리거 1개만 있을 때 judged에서 recent_messages 보충 후 prompt에 포함"""
-        # judged에 5개 메시지
+        """pending에 트리거 1개만 있을 때 soulstream.run이 호출되고 prompt는 고정 문자열"""
         _fill_judged(store, channel_id, n=5)
 
-        # pending에 트리거 1개만
         trigger_ts = "9999.000"
         store.append_pending(channel_id, {
             "ts": trigger_ts, "user": "UTRIG", "text": "트리거 메시지",
@@ -1567,26 +1569,19 @@ class TestInterveneRecentMessagesFromJudged:
         # soulstream.run 호출 확인
         mock_plugin_sdk["soulstream"].run.assert_awaited_once()
         call_kwargs = mock_plugin_sdk["soulstream"].run.call_args[1]
-        # prompt는 [화자]: 메시지 형식의 대화 이력 (recent_messages + trigger_message)
-        prompt = call_kwargs["prompt"]
-        # 트리거 메시지가 화자 포함 형식으로 prompt에 포함되어야 함
-        assert "[UTRIG]: 트리거 메시지" in prompt
-        # judged 메시지도 화자 포함 형식으로 prompt에 포함되어야 함
-        assert "[U0]:" in prompt
-        assert "[U4]:" in prompt
+        # prompt는 고정 문자열
+        assert call_kwargs["prompt"] == "(채널 개입 트리거)"
         # context에는 recent_messages 키가 없어야 함
         context = call_kwargs["context"]
         assert not any(item["key"] == "recent_messages" for item in context)
         # observer_reason은 의도적으로 비활성화됨 (pipeline.py L869-874 참조)
-        # 자연스러운 대화 개입에 방해가 된다는 판단으로 context에서 제거된 상태
         assert not any(item["key"] == "observer_reason" for item in context)
 
     @pytest.mark.asyncio
     async def test_combined_judged_pending_context(self, store, channel_id, mock_plugin_sdk):
-        """judged 5개 + pending 3개, 트리거가 pending 마지막일 때 prompt에 이력 포함"""
+        """judged 5개 + pending 3개, 트리거가 pending 마지막일 때 soulstream.run이 호출되고 prompt는 고정 문자열"""
         _fill_judged(store, channel_id, n=5)
 
-        # pending에 3개 (트리거는 마지막)
         for i in range(3):
             store.append_pending(channel_id, {
                 "ts": f"300{i}.000", "user": f"UP{i}", "text": f"pending 메시지 {i}번",
@@ -1614,21 +1609,8 @@ class TestInterveneRecentMessagesFromJudged:
 
         mock_plugin_sdk["soulstream"].run.assert_awaited_once()
         call_kwargs = mock_plugin_sdk["soulstream"].run.call_args[1]
-        # recent_messages_count=5 (기본값)이므로 트리거 직전 5개:
-        # all_context = [judged_0..4, pending_0..2], 트리거=pending_2(index 7)
-        # recent = all_context[2:7] = [judged_2, judged_3, judged_4, pending_0, pending_1]
-        # prompt = recent_lines + trigger_line
-        prompt = call_kwargs["prompt"]
-        # 윈도우 내 메시지가 화자 포함 형식으로 포함되어야 함
-        assert "[U2]:" in prompt
-        assert "[U4]:" in prompt
-        assert "[UP0]: pending 메시지 0번" in prompt
-        assert "[UP1]: pending 메시지 1번" in prompt
-        # 트리거도 포함
-        assert "[UP2]: pending 메시지 2번" in prompt
-        # judged_0, judged_1은 윈도우 밖 → 포함되지 않음
-        assert "[U0]:" not in prompt
-        assert "[U1]:" not in prompt
+        # prompt는 고정 문자열
+        assert call_kwargs["prompt"] == "(채널 개입 트리거)"
         # context에는 recent_messages 키가 없어야 함
         context = call_kwargs["context"]
         assert not any(item["key"] == "recent_messages" for item in context)
