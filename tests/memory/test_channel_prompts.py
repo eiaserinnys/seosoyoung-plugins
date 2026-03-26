@@ -156,13 +156,14 @@ class TestDisplayNameResolver:
         assert resolver.resolve("U001") == "U001"
 
     def test_resolve_with_display_name(self):
-        """users_info 성공 시 '디스플레이네임 (UID)' 형식 반환"""
+        """users_info 성공 시 '이름 / [UID]' 형식 반환"""
         class MockSlackClient:
             def users_info(self, user):
                 return {
                     "ok": True,
                     "user": {
                         "name": "jdoe",
+                        "is_bot": False,
                         "profile": {
                             "display_name": "John",
                             "real_name": "John Doe",
@@ -172,7 +173,7 @@ class TestDisplayNameResolver:
 
         resolver = DisplayNameResolver(slack_client=MockSlackClient())
         result = resolver.resolve("U001")
-        assert result == "John (U001)"
+        assert result == "John / [U001]"
 
     def test_resolve_fallback_to_real_name(self):
         """display_name이 없으면 real_name 사용"""
@@ -182,6 +183,7 @@ class TestDisplayNameResolver:
                     "ok": True,
                     "user": {
                         "name": "jdoe",
+                        "is_bot": False,
                         "profile": {
                             "display_name": "",
                             "real_name": "John Doe",
@@ -191,7 +193,27 @@ class TestDisplayNameResolver:
 
         resolver = DisplayNameResolver(slack_client=MockSlackClient())
         result = resolver.resolve("U002")
-        assert result == "John Doe (U002)"
+        assert result == "John Doe / [U002]"
+
+    def test_resolve_bot_account(self):
+        """봇 계정은 '이름 / [UID] [봇]' 형식 반환"""
+        class MockSlackClient:
+            def users_info(self, user):
+                return {
+                    "ok": True,
+                    "user": {
+                        "name": "mybot",
+                        "is_bot": True,
+                        "profile": {
+                            "display_name": "MyBot",
+                            "real_name": "My Bot",
+                        },
+                    },
+                }
+
+        resolver = DisplayNameResolver(slack_client=MockSlackClient())
+        result = resolver.resolve("U999")
+        assert result == "MyBot / [U999] [봇]"
 
     def test_resolve_caches_result(self):
         """같은 ID는 1회만 API 호출"""
@@ -238,24 +260,28 @@ class TestFormatWithResolver:
                 name = names.get(user, user)
                 return {
                     "ok": True,
-                    "user": {"name": user, "profile": {"display_name": name, "real_name": name}},
+                    "user": {
+                        "name": user,
+                        "is_bot": False,
+                        "profile": {"display_name": name, "real_name": name},
+                    },
                 }
         return DisplayNameResolver(slack_client=MockSlackClient())
 
     def test_channel_messages_with_resolver(self):
-        """resolver 적용 시 디스플레이네임으로 변환"""
+        """resolver 적용 시 '이름 / [UID]' 형식으로 변환"""
         msgs = [{"ts": "1.1", "user": "U001", "text": "hello"}]
         resolver = self._make_resolver()
         result = _format_channel_messages(msgs, resolver=resolver)
-        assert "Alice (U001)" in result
-        assert "[1.1] Alice (U001): hello" == result
+        assert "Alice / [U001]" in result
+        assert "[1.1] Alice / [U001]: hello" == result
 
     def test_pending_messages_with_resolver(self):
         """pending 포맷도 resolver 적용"""
         msgs = [{"ts": "2.1", "user": "U002", "text": "world"}]
         resolver = self._make_resolver()
         result = _format_pending_messages(msgs, resolver=resolver)
-        assert "Bob (U002)" in result
+        assert "Bob / [U002]" in result
 
     def test_thread_messages_with_resolver(self):
         """스레드 포맷도 resolver 적용"""
@@ -264,7 +290,7 @@ class TestFormatWithResolver:
         }
         resolver = self._make_resolver()
         result = _format_thread_messages(buffers, resolver=resolver)
-        assert "Alice (U001)" in result
+        assert "Alice / [U001]" in result
 
 
 class TestFormatFilesEnhanced:

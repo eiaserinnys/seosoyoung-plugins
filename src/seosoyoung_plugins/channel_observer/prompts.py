@@ -26,8 +26,9 @@ class DisplayNameResolver:
         self._cache: dict[str, str] = {}
 
     def resolve(self, user_id: str) -> str:
-        """user_id를 '디스플레이네임 (UID)' 형식으로 변환합니다.
+        """user_id를 '이름 / [UID]' 형식으로 변환합니다.
 
+        봇 계정은 '봇이름 / [UID] [봇]' 형식으로 반환합니다.
         slack_client가 없거나 조회 실패 시 원래 user_id를 반환합니다.
         """
         if user_id in self._cache:
@@ -47,7 +48,11 @@ class DisplayNameResolver:
                     or user_data.get("name")
                     or user_id
                 )
-                formatted = f"{display_name} ({user_id})"
+                is_bot = user_data.get("is_bot", False)
+                if is_bot:
+                    formatted = f"{display_name} / [{user_id}] [봇]"
+                else:
+                    formatted = f"{display_name} / [{user_id}]"
                 self._cache[user_id] = formatted
                 return formatted
         except Exception as e:
