@@ -88,7 +88,7 @@ class TestFormatRecentContext:
     def test_formats_user_and_text(self):
         messages = [Message(ts="1000.0", text="안녕하세요", user="U001")]
         result = _format_recent_context(messages)
-        assert "[U001]: 안녕하세요" in result
+        assert "[1000.0] <U001>: 안녕하세요" in result
 
     def test_multiple_messages(self):
         messages = [
@@ -96,8 +96,8 @@ class TestFormatRecentContext:
             Message(ts="1001.0", text="두 번째", user="U002"),
         ]
         result = _format_recent_context(messages)
-        assert "[U001]: 첫 번째" in result
-        assert "[U002]: 두 번째" in result
+        assert "[1000.0] <U001>: 첫 번째" in result
+        assert "[1001.0] <U002>: 두 번째" in result
 
     def test_all_messages_included(self):
         """truncation 없이 전달된 메시지를 모두 포맷한다."""
@@ -109,7 +109,7 @@ class TestFormatRecentContext:
     def test_missing_user_becomes_unknown(self):
         messages = [Message(ts="1000.0", text="내용")]
         result = _format_recent_context(messages)
-        assert "[unknown]:" in result
+        assert "<unknown>:" in result
 
 
 @dataclass
@@ -145,9 +145,9 @@ class TestFetchRecentContext:
         ]
         result = await _fetch_recent_context("C123", count=15)
         lines = result.strip().split("\n")
-        # reversed → 시간순 (oldest first)
-        assert "[U001]: oldest" in lines[0]
-        assert "[U003]: newest" in lines[2]
+        # reversed → 시간순 (oldest first), channel_id 포함 포맷
+        assert "[C123:1] <U001>: oldest" in lines[0]
+        assert "[C123:3] <U003>: newest" in lines[2]
 
     async def test_api_failure_returns_empty(self, mock_slack):
         mock_slack.get_channel_history.side_effect = Exception("API error")
@@ -169,4 +169,4 @@ class TestFetchRecentContext:
             FakeMessage(ts="1", text="hello", user=None),
         ]
         result = await _fetch_recent_context("C123")
-        assert "[unknown]: hello" in result
+        assert "[C123:1] <unknown>: hello" in result
