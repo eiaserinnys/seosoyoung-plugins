@@ -984,7 +984,7 @@ async def _fetch_recent_context(
         history = await slack.get_channel_history(channel_id, limit=count)
         # Slack API는 최신순 반환 → 시간순으로 뒤집기
         messages = list(reversed(history))  # list[Message] 그대로 전달 (rich 필드 보존)
-        return _format_recent_context(messages, bot_user_id=bot_user_id, resolver=resolver)
+        return _format_recent_context(messages, bot_user_id=bot_user_id, resolver=resolver, channel_id=channel_id)
     except Exception as e:
         logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
         return ""
@@ -994,8 +994,9 @@ def _format_recent_context(
     messages: list[Message],
     bot_user_id: str | None = None,
     resolver: DisplayNameResolver | None = None,
+    channel_id: str | None = None,
 ) -> str:
-    """메시지 리스트를 [user]: text 형식의 텍스트로 변환합니다.
+    """메시지 리스트를 [channel_id:ts] <user>: text 형식의 텍스트로 변환합니다.
 
     채널 개입 세션의 '스레드 맥락'에 최근 대화 흐름을 제공하기 위해 사용합니다.
     잘라내기(truncation)는 호출자가 담당합니다.
@@ -1004,6 +1005,9 @@ def _format_recent_context(
     삽입하여, 개입 세션이 이미 멘션 핸들러가 처리 중인 스레드에 중복 답변하지 않도록 한다.
     이 함수는 get_channel_history(채널 루트만 반환)의 결과를 받으므로
     스레드 중간 메시지는 이미 제외된 상태다. 별도 thread_ts 필터는 불필요하다.
+
+    channel_id가 주어지면 mention 세션과 동일한 [channel_id:ts] <user>: text 포맷을 사용한다.
+    channel_id가 없으면 [ts] <user>: text 형식으로 폴백한다.
 
     reactions, files, blocks 등 rich 필드가 있으면 들여쓰기 보조 줄로 추가합니다.
     """
@@ -1014,7 +1018,8 @@ def _format_recent_context(
     for m in messages:
         tag = " [BOT MENTION THREAD]" if (mention_pattern and mention_pattern in (m.text or "")) else ""
         user_label = (resolver.resolve(m.user) if resolver and m.user else m.user) or "unknown"
-        line = f"[{user_label}]: {m.text or ''}{tag}"
+        prefix = f"[{channel_id}:{m.ts}] " if channel_id else f"[{m.ts}] "
+        line = f"{prefix}<{user_label}>: {m.text or ''}{tag}"
 
         # Rich data (없으면 생략)
         rich_parts = []
