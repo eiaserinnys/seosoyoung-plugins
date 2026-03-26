@@ -30,6 +30,17 @@ Read the flow carefully, then write a message that fits naturally into the conve
 
 ## 답변 절차
 
+### 0. 멤버 조회 (생략 불가)
+
+답변을 작성하기 전에 반드시 먼저 수행해야 하는 단계입니다.
+이 단계를 건너뛰면 멤버를 잘못 호칭하는 오류가 발생합니다.
+
+1. `slack-member-recall` 스킬을 로드한다
+2. thread_context와 channel_digest에 등장하는 모든 멤버(U코드)를 조회한다
+3. 조회 결과를 바탕으로 이후 응답에서 정확한 호칭을 사용한다
+
+이 단계 완료 전에는 어떤 응답도 작성하지 않는다.
+
 ### 1. 정보 수집
 
 답변을 작성하기 **전에**, 다음 스킬을 먼저 호출하여 정보를 수집한다.

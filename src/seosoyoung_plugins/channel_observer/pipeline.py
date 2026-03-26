@@ -33,6 +33,7 @@ from seosoyoung_plugins.channel_observer.observer import (
     JudgeResult,
 )
 from seosoyoung_plugins.channel_observer.prompts import (
+    DisplayNameResolver,
     get_channel_intervene_system_prompt,
 )
 from seosoyoung_plugins.channel_observer.store import ChannelStore
@@ -755,6 +756,17 @@ async def _handle_single_judge(
         )
 
 
+def _make_resolver() -> DisplayNameResolver | None:
+    """현재 Slack 백엔드에서 WebClient를 추출해 DisplayNameResolver를 생성합니다.
+
+    백엔드가 없거나 _client 속성이 없으면 None을 반환합니다.
+    반환된 None은 호출자에서 안전하게 처리됩니다(resolver=None → user_id 그대로 사용).
+    """
+    backend = slack.get_backend()
+    raw_client = getattr(backend, "_client", None)
+    return DisplayNameResolver(raw_client) if raw_client else None
+
+
 async def _execute_intervene(
     store: ChannelStore,
     channel_id: str,
@@ -854,7 +866,11 @@ async def _execute_intervene(
         {
             "key": "thread_context",
             "label": "스레드 맥락",
-            "content": await _fetch_recent_context(channel_id, bot_user_id=bot_user_id),
+            "content": await _fetch_recent_context(
+                channel_id,
+                bot_user_id=bot_user_id,
+                resolver=_make_resolver(),
+            ),
         },
         # NOTE: "관찰자 판단 근거" 섹션을 비활성화 — 자연스러운 대화 개입에 방해가 된다고 판단
         # {
@@ -962,6 +978,7 @@ async def _fetch_recent_context(
     channel_id: str,
     count: int = 15,
     bot_user_id: str | None = None,
+    resolver: DisplayNameResolver | None = None,
 ) -> str:
     """슬랙 API로 채널의 최근 메시지를 가져와 포맷합니다.
 
@@ -971,7 +988,7 @@ async def _fetch_recent_context(
         history = await slack.get_channel_history(channel_id, limit=count)
         # Slack API는 최신순 반환 → 시간순으로 뒤집기
         messages = list(reversed(history))  # list[Message] 그대로 전달 (rich 필드 보존)
-        return _format_recent_context(messages, bot_user_id=bot_user_id)
+        return _format_recent_context(messages, bot_user_id=bot_user_id, resolver=resolver)
     except Exception as e:
         logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
         return ""
@@ -980,6 +997,7 @@ async def _fetch_recent_context(
 def _format_recent_context(
     messages: list[Message],
     bot_user_id: str | None = None,
+    resolver: DisplayNameResolver | None = None,
 ) -> str:
     """메시지 리스트를 [user]: text 형식의 텍스트로 변환합니다.
 
@@ -999,7 +1017,8 @@ def _format_recent_context(
     lines = []
     for m in messages:
         tag = " [BOT MENTION THREAD]" if (mention_pattern and mention_pattern in (m.text or "")) else ""
-        line = f"[{m.user or 'unknown'}]: {m.text or ''}{tag}"
+        user_label = (resolver.resolve(m.user) if resolver and m.user else m.user) or "unknown"
+        line = f"[{user_label}]: {m.text or ''}{tag}"
 
         # Rich data (없으면 생략)
         rich_parts = []
