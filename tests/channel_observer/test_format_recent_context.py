@@ -1,6 +1,7 @@
 """_format_recent_context 및 _fetch_recent_context 단위 테스트
 
 [BOT MENTION THREAD] 태그 삽입 로직과 rich data 직렬화를 검증합니다.
+포맷: [channel_id:ts] <user>: text (channel_id 없으면 [ts] <user>: text)
 """
 
 import pytest
@@ -24,8 +25,8 @@ class TestFormatRecentContext:
         ]
         result = _format_recent_context(messages)
         assert "[BOT MENTION THREAD]" not in result
-        assert "[U001]: 안녕하세요 <@BOTXXX> 여기 봐주세요" in result
-        assert "[U002]: 일반 메시지" in result
+        assert "[1000.0] <U001>: 안녕하세요 <@BOTXXX> 여기 봐주세요" in result
+        assert "[1001.0] <U002>: 일반 메시지" in result
 
     def test_mention_message_tagged(self):
         """<@BOT123>이 포함된 메시지에 [BOT MENTION THREAD] 태그가 붙는다."""
@@ -33,7 +34,7 @@ class TestFormatRecentContext:
             Message(ts="1000.0", text="<@BOT123> 작업해줘", user="U001"),
         ]
         result = _format_recent_context(messages, bot_user_id="BOT123")
-        assert "[U001]: <@BOT123> 작업해줘 [BOT MENTION THREAD]" in result
+        assert "[1000.0] <U001>: <@BOT123> 작업해줘 [BOT MENTION THREAD]" in result
 
     def test_non_mention_message_not_tagged(self):
         """봇 멘션이 없는 메시지에는 태그가 붙지 않는다."""
@@ -42,7 +43,7 @@ class TestFormatRecentContext:
         ]
         result = _format_recent_context(messages, bot_user_id="BOT123")
         assert "[BOT MENTION THREAD]" not in result
-        assert "[U001]: 일반 대화입니다" in result
+        assert "[1000.0] <U001>: 일반 대화입니다" in result
 
     def test_mixed_messages(self):
         """멘션/비멘션 혼합 목록에서 멘션 메시지만 태깅된다."""
@@ -79,7 +80,7 @@ class TestFormatRecentContext:
             ),
         ]
         result = _format_recent_context(messages)
-        assert "[U001]: 좋은 아이디어네요" in result
+        assert "[1000.0] <U001>: 좋은 아이디어네요" in result
         assert ":thumbsup: ×3 (눌린 사람: U002, U003, U004)" in result
         assert ":heart: ×1 (눌린 사람: U005)" in result
         assert "리액션:" in result
@@ -102,7 +103,7 @@ class TestFormatRecentContext:
             ),
         ]
         result = _format_recent_context(messages)
-        assert "[U001]: 파일 공유합니다" in result
+        assert "[1000.0] <U001>: 파일 공유합니다" in result
         assert "분기 보고서 (application/pdf)" in result
         assert "첨부:" in result
 
@@ -117,21 +118,38 @@ class TestFormatRecentContext:
             ),
         ]
         result = _format_recent_context(messages)
-        assert "[U001]: 블록 메시지" in result
+        assert "[1000.0] <U001>: 블록 메시지" in result
         assert "[블록 포함]" in result
 
     def test_no_rich_data_preserves_original_format(self):
-        """rich data가 없는 메시지는 기존 포맷(단일 줄)을 유지한다."""
+        """rich data가 없는 메시지는 단일 줄로 반환한다."""
         messages = [
             Message(ts="1000.0", text="일반 메시지", user="U001"),
         ]
         result = _format_recent_context(messages)
-        assert result == "[U001]: 일반 메시지"
+        assert result == "[1000.0] <U001>: 일반 메시지"
         assert "\n" not in result
+
+    def test_with_channel_id_prefix(self):
+        """channel_id가 주어지면 [channel_id:ts] 프리픽스를 포함한다."""
+        messages = [
+            Message(ts="1000.0", text="안녕하세요", user="U001"),
+        ]
+        result = _format_recent_context(messages, channel_id="C_TEST")
+        assert "[C_TEST:1000.0] <U001>: 안녕하세요" in result
+
+    def test_without_channel_id_uses_ts_only_prefix(self):
+        """channel_id가 없으면 [ts] 형식의 프리픽스만 포함한다."""
+        messages = [
+            Message(ts="1000.0", text="안녕하세요", user="U001"),
+        ]
+        result = _format_recent_context(messages, channel_id=None)
+        assert "[1000.0] <U001>: 안녕하세요" in result
+        assert "None" not in result
 
 
 class TestFetchRecentContextPassesBotUserId:
-    """_fetch_recent_context가 bot_user_id를 _format_recent_context에 전달하는지 검증"""
+    """_fetch_recent_context가 bot_user_id와 channel_id를 _format_recent_context에 전달하는지 검증"""
 
     @pytest.mark.asyncio
     async def test_fetch_recent_context_passes_bot_user_id(self):
@@ -154,3 +172,4 @@ class TestFetchRecentContextPassesBotUserId:
             mock_format.assert_called_once()
             _, kwargs = mock_format.call_args
             assert kwargs.get("bot_user_id") == "BOT123"
+            assert kwargs.get("channel_id") == "C123"
