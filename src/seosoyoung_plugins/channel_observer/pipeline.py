@@ -10,6 +10,7 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -756,6 +757,18 @@ async def _handle_single_judge(
         )
 
 
+def _extract_utterances(text: str) -> str | None:
+    """<utterance> 태그 내용을 모두 추출하여 연결합니다.
+
+    태그가 없으면 None을 반환합니다.
+    태그가 있지만 내용이 비어있으면 빈 문자열을 반환합니다.
+    """
+    matches = re.findall(r"<utterance>(.*?)</utterance>", text, re.DOTALL)
+    if not matches:
+        return None
+    return "\n".join(m.strip() for m in matches)
+
+
 def _make_resolver() -> DisplayNameResolver | None:
     """현재 Slack 백엔드에서 WebClient를 추출해 DisplayNameResolver를 생성합니다.
 
@@ -889,6 +902,10 @@ async def _execute_intervene(
         )
         if result.ok:
             response_text = result.output
+            # <utterance> 태그에서 실제 발화만 추출 (태그 없으면 전체 텍스트 fallback)
+            utterance = _extract_utterances(response_text)
+            if utterance is not None:
+                response_text = utterance
         else:
             logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")
             await _remove_thinking_reaction(channel_id, reaction_ts)
