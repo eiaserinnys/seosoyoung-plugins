@@ -854,11 +854,6 @@ async def _execute_intervene(
 
     context_items = [
         {
-            "key": "system_prompt",
-            "label": "시스템 프롬프트",
-            "content": system_prompt,
-        },
-        {
             "key": "channel_digest",
             "label": "채널 요약",
             "content": digest if digest else "",
@@ -888,6 +883,7 @@ async def _execute_intervene(
             thread_ts=run_thread_ts,
             text_only=True,
             context=context_items,
+            system_prompt=system_prompt,  # context_item 대신 실제 API system 파라미터로 전달
             model=intervene_model,
             folder_id=folder_id,
         )
