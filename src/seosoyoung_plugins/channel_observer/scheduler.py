@@ -38,6 +38,7 @@ class ChannelDigestScheduler:
         digest_target_tokens: int = 5000,
         debug_channel: str = "",
         intervention_threshold: float = 0.3,
+        react_probability: float = 1.0,
         llm_call: Optional[Callable] = None,
         bot_user_id: str = "",
         recent_messages_count: int = 5,
@@ -56,6 +57,7 @@ class ChannelDigestScheduler:
         self.digest_target_tokens = digest_target_tokens
         self.debug_channel = debug_channel
         self.intervention_threshold = intervention_threshold
+        self.react_probability = react_probability
         self.llm_call = llm_call
         self.bot_user_id = bot_user_id
         self.recent_messages_count = recent_messages_count
@@ -141,6 +143,7 @@ class ChannelDigestScheduler:
                     digest_target_tokens=self.digest_target_tokens,
                     debug_channel=self.debug_channel,
                     intervention_threshold=self.intervention_threshold,
+                    react_probability=self.react_probability,
                     llm_call=self.llm_call,
                     bot_user_id=self.bot_user_id,
                     recent_messages_count=self.recent_messages_count,
