@@ -72,6 +72,7 @@ class ChannelObserverPlugin(Plugin):
         self._intervention_threshold: float = config.get(
             "intervention_threshold", 0.18
         )
+        self._react_probability: float = config.get("react_probability", 1.0)
         self._recent_messages_count: int = config.get(
             "recent_messages_count", 5
         )
@@ -175,6 +176,7 @@ class ChannelObserverPlugin(Plugin):
                 digest_target_tokens=self._digest_target_tokens,
                 debug_channel=self._debug_channel,
                 intervention_threshold=self._intervention_threshold,
+                react_probability=self._react_probability,
                 llm_call=self._llm_call,
                 bot_user_id=self._bot_user_id,
                 recent_messages_count=self._recent_messages_count,
@@ -348,6 +350,7 @@ class ChannelObserverPlugin(Plugin):
                             digest_target_tokens=self._digest_target_tokens,
                             debug_channel=self._debug_channel,
                             intervention_threshold=self._intervention_threshold,
+                            react_probability=self._react_probability,
                             llm_call=self._llm_call,
                             bot_user_id=self._bot_user_id,
                             recent_messages_count=self._recent_messages_count,

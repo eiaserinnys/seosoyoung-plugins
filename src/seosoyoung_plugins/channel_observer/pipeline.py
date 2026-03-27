@@ -10,6 +10,7 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 
 import logging
 import math
+import random
 import re
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -278,6 +279,7 @@ async def run_channel_pipeline(
     digest_target_tokens: int = 5_000,
     debug_channel: str = "",
     intervention_threshold: float = 0.3,
+    react_probability: float = 1.0,
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
     recent_messages_count: int = 5,
@@ -458,6 +460,7 @@ async def run_channel_pipeline(
                 current_digest=current_digest,
                 debug_channel=debug_channel,
                 intervention_threshold=intervention_threshold,
+                react_probability=react_probability,
                 llm_call=llm_call,
                 bot_user_id=bot_user_id,
                 session_manager=kwargs.get("session_manager"),
@@ -480,6 +483,7 @@ async def run_channel_pipeline(
                 current_digest=current_digest,
                 debug_channel=debug_channel,
                 intervention_threshold=intervention_threshold,
+                react_probability=react_probability,
                 llm_call=llm_call,
                 bot_user_id=bot_user_id,
                 session_manager=kwargs.get("session_manager"),
@@ -506,6 +510,7 @@ async def _handle_multi_judge(
     intervention_threshold: float,
     llm_call: Optional[Callable],
     bot_user_id: str | None = None,
+    react_probability: float = 1.0,
     session_manager=None,
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
@@ -527,6 +532,10 @@ async def _handle_multi_judge(
     react_actions = _filter_already_reacted(
         react_actions, pending_messages, bot_user_id,
     )
+
+    # 이모지 리액션 확률 필터링
+    if react_probability < 1.0:
+        react_actions = [a for a in react_actions if random.random() < react_probability]
 
     # 이모지 리액션 일괄 실행
     if react_actions:
@@ -631,6 +640,7 @@ async def _handle_single_judge(
     intervention_threshold: float,
     llm_call: Optional[Callable],
     bot_user_id: str | None = None,
+    react_probability: float = 1.0,
     session_manager=None,
     thread_buffers: dict[str, list[dict]] | None = None,
     mention_handled_ts: set[str] | None = None,
@@ -682,6 +692,10 @@ async def _handle_single_judge(
         react_actions = _filter_already_reacted(
             react_actions, pending_messages, bot_user_id,
         )
+
+        # 이모지 리액션 확률 필터링
+        if react_probability < 1.0:
+            react_actions = [a for a in react_actions if random.random() < react_probability]
 
         if react_actions:
             await execute_interventions(channel_id, react_actions)
