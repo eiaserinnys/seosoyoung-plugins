@@ -14,13 +14,10 @@ import threading
 from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
+from seosoyoung_plugins.channel_observer import pipeline_lock
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 logger = logging.getLogger(__name__)
-
-# 채널별 소화 파이프라인 실행 중 여부 (중복 실행 방지)
-_digest_running: dict[str, bool] = {}
-_digest_lock = threading.Lock()
 
 
 class ChannelObserverPlugin(Plugin):
@@ -319,10 +316,8 @@ class ChannelObserverPlugin(Plugin):
         if not force and pending_tokens < self._threshold_a:
             return
 
-        with _digest_lock:
-            if _digest_running.get(channel_id):
-                return
-            _digest_running[channel_id] = True
+        if not pipeline_lock.try_acquire(channel_id):
+            return
 
         threshold_a = 1 if force else self._threshold_a
 
@@ -365,8 +360,7 @@ class ChannelObserverPlugin(Plugin):
                     f"채널 파이프라인 실행 실패 ({channel_id}): {e}"
                 )
             finally:
-                with _digest_lock:
-                    _digest_running[channel_id] = False
+                pipeline_lock.release(channel_id)
 
         digest_thread = threading.Thread(target=run, daemon=True)
         digest_thread.start()
