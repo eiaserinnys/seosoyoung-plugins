@@ -127,7 +127,12 @@ class ChannelDigestScheduler:
 
     def _run_pipeline(self, channel_id: str) -> None:
         """소화/판단 파이프라인을 실행합니다."""
+        from seosoyoung_plugins.channel_observer import pipeline_lock
         from seosoyoung_plugins.channel_observer.pipeline import run_channel_pipeline
+
+        if not pipeline_lock.try_acquire(channel_id):
+            logger.debug(f"주기적 파이프라인 스킵 ({channel_id}): 이미 실행 중")
+            return
 
         try:
             asyncio.run(
@@ -153,3 +158,5 @@ class ChannelDigestScheduler:
             )
         except Exception as e:
             logger.error(f"주기적 파이프라인 실행 실패 ({channel_id}): {e}")
+        finally:
+            pipeline_lock.release(channel_id)
