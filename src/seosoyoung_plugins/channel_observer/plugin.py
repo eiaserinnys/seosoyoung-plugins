@@ -79,6 +79,20 @@ class ChannelObserverPlugin(Plugin):
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
 
+        # Atom channel store settings
+        self._atom_channel_store: bool = config.get("atom_channel_store", False)
+        self._atom_config: dict | None = None
+        if self._atom_channel_store:
+            import os
+            api_key = os.environ.get(
+                config.get("atom_api_key_env", "CHAT_WRITE_API_KEY"), ""
+            )
+            self._atom_config = {
+                "atom_base_url": config["atom_base_url"],
+                "atom_api_key": api_key,
+                "atom_slack_root_node_id": config.get("atom_slack_root_node_id", ""),
+            }
+
         # Runtime components (initialized in on_startup)
         self._store = None
         self._collector = None
@@ -108,6 +122,7 @@ class ChannelObserverPlugin(Plugin):
             "on_message": self._on_message,
             "on_startup": self._on_startup,
             "on_shutdown": self._on_shutdown,
+            "before_execute": self._on_before_execute,
         }
 
     # -- Hook handlers ---------------------------------------------------------
@@ -142,7 +157,11 @@ class ChannelObserverPlugin(Plugin):
             ChannelDigestScheduler,
         )
 
-        self._store = ChannelStore(base_dir=self._memory_path)
+        if self._atom_config:
+            from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
+            self._store = AtomChannelStore(config=self._atom_config)
+        else:
+            self._store = ChannelStore(base_dir=self._memory_path)
         self._collector = ChannelMessageCollector(
             store=self._store,
             target_channels=self._channels,
@@ -207,6 +226,39 @@ class ChannelObserverPlugin(Plugin):
         if self._scheduler:
             self._scheduler.stop()
         return HookResult.CONTINUE, None
+
+    async def _on_before_execute(
+        self, ctx: HookContext
+    ) -> tuple[HookResult, Any]:
+        """멘션 세션 실행 전 atom 채널 컨텍스트 주입."""
+        import asyncio as _asyncio
+        _compile_fn = getattr(self._store, "compile_channel_context", None) if self._store else None
+        if not callable(_compile_fn) or not _asyncio.iscoroutinefunction(_compile_fn):
+            return HookResult.CONTINUE, None
+
+        channel = ctx.args.get("channel", "")
+        if channel not in self._channels:
+            return HookResult.CONTINUE, None
+
+        context_items = ctx.args.get("context_items", [])
+
+        try:
+            atom_context = await _compile_fn(channel, limit=20)
+            if not atom_context:
+                return HookResult.CONTINUE, None
+
+            updated_items = [
+                item for item in context_items if item.get("key") != "channel_digest"
+            ]
+            updated_items.insert(0, {
+                "key": "channel_digest",
+                "label": "채널 컨텍스트",
+                "content": atom_context,
+            })
+            return HookResult.CONTINUE, {"context_items": updated_items}
+        except Exception as e:
+            logger.warning("ChannelObserver before_execute 실패 (무시): %s", e)
+            return HookResult.CONTINUE, None
 
     async def _on_message(
         self, ctx: HookContext
