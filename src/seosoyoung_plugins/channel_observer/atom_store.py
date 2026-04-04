@@ -156,7 +156,7 @@ class AtomChannelStore:
             body["content"] = content
         if tags:
             body["tags"] = tags
-        result = await self._post_with_retry("/api/chat/cards", body)
+        result = await self._post_with_retry("/api/cards", body)
         if result:
             return result.get("node_id")
         return None
@@ -175,13 +175,13 @@ class AtomChannelStore:
             "parent_node_id": parent_node_id,
             "content": content,
         }
-        result = await self._post_with_retry("/api/chat/cards", body)
+        result = await self._post_with_retry("/api/cards", body)
         if not result:
             return None
         card_id = result.get("id") or result.get("card_id")
         if card_id and staleness:
             await self._patch_with_retry(
-                f"/api/chat/cards/{card_id}",
+                f"/api/cards/{card_id}",
                 {"staleness": staleness},
             )
         return card_id
@@ -295,7 +295,7 @@ class AtomChannelStore:
         existing_card_id = self._digest_card_ids.get(cache_key)
         if existing_card_id:
             await self._patch_with_retry(
-                f"/api/chat/cards/{existing_card_id}",
+                f"/api/cards/{existing_card_id}",
                 {"content": content, "title": title},
             )
         else:
@@ -308,7 +308,7 @@ class AtomChannelStore:
                 "parent_node_id": digest_node,
                 "content": content,
             }
-            result = await self._post_with_retry("/api/chat/cards", body)
+            result = await self._post_with_retry("/api/cards", body)
             if result:
                 card_id = result.get("id") or result.get("card_id")
                 if card_id:
@@ -317,7 +317,7 @@ class AtomChannelStore:
     async def _patch_card_staleness(self, card_id: str, staleness: str) -> None:
         """카드 staleness를 업데이트."""
         await self._patch_with_retry(
-            f"/api/chat/cards/{card_id}",
+            f"/api/cards/{card_id}",
             {"staleness": staleness},
         )
 
