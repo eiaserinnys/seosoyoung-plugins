@@ -74,7 +74,7 @@ class AtomChannelStore:
 
         # HTTP session (created lazily per-thread via asyncio.run)
         self._headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "x-api-key": self._api_key,
             "Content-Type": "application/json",
         }
 
