@@ -20,6 +20,8 @@ from typing import Awaitable, Callable
 
 import aiohttp
 
+from seosoyoung_plugins.channel_observer.store import ChannelStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,10 +35,13 @@ class AtomChannelStore:
                     └── {thread_ts}       (thread/root-message node)
                           └── {reply_ts}  (reply node)
 
+    Composes an internal ChannelStore for file-based pipeline buffers,
+    while dual-writing messages to both the local buffer and atom.
+
     Usage:
-        store = AtomChannelStore(config)
-        store.append_thread_message(channel_id, thread_ts, message)
-        store.move_snapshot_to_judged(channel_id, ts, staleness)
+        store = AtomChannelStore(config)  # config must include 'base_dir'
+        store.append_channel_message(channel_id, message)  # dual-write
+        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
         store.write_interpretation(channel_id, ts, order, content)
     """
 
@@ -44,6 +49,12 @@ class AtomChannelStore:
         self._base_url: str = config["atom_base_url"].rstrip("/")
         self._api_key: str = config["atom_api_key"]
         self._slack_root_node_id: str = config["atom_slack_root_node_id"]
+
+        # Internal file-based store for pipeline buffer methods
+        base_dir = config.get("base_dir")
+        if not base_dir:
+            raise ValueError("AtomChannelStore requires 'base_dir' in config")
+        self._file_store = ChannelStore(base_dir=base_dir)
 
         # Callable[[user_id: str], Awaitable[str]] | None
         self._user_name_resolver: Callable[[str], Awaitable[str]] | None = config.get(
@@ -440,25 +451,22 @@ class AtomChannelStore:
     # =========================================================================
 
     def append_channel_message(self, channel_id: str, message: dict) -> None:
-        """Fire-and-forget: write a new root-message card to atom."""
+        """Dual-write: local file buffer + fire-and-forget atom card."""
+        self._file_store.append_channel_message(channel_id, message)
         self._fire_and_forget(self._write_pending_card(channel_id, message))
 
     def upsert_pending(self, channel_id: str, message: dict) -> None:
-        """Fire-and-forget: create or update a root-message card in atom.
+        """Dual-write: local file buffer + fire-and-forget atom card.
 
         Called for message_changed events on channel root messages.
         _write_pending_card is idempotent via _get_or_create_thread_node.
         """
+        self._file_store.upsert_pending(channel_id, message)
         self._fire_and_forget(self._write_pending_card(channel_id, message))
 
     def count_pending_tokens(self, channel_id: str) -> int:
-        """Atom store has no local pending buffer; always returns 0.
-
-        Messages are written directly to atom (fire-and-forget), so there
-        is no local buffer to count. The digest pipeline is not triggered
-        by token count in atom mode.
-        """
-        return 0
+        """Delegate to file store for pipeline token counting."""
+        return self._file_store.count_pending_tokens(channel_id)
 
     def update_reactions(
         self,
@@ -469,47 +477,112 @@ class AtomChannelStore:
         user: str,
         action: str,
     ) -> None:
-        """Atom store does not persist reaction deltas; no-op.
+        """Delegate to file store for reaction tracking."""
+        self._file_store.update_reactions(
+            channel_id, ts=ts, emoji=emoji, user=user, action=action
+        )
 
-        Reaction counts are not stored in the atom knowledge tree.
-        """
+    # -- Pipeline buffer delegation (all forwarded to _file_store) --
+
+    def load_pending(self, channel_id: str) -> list[dict]:
+        return self._file_store.load_pending(channel_id)
+
+    def load_judged(self, channel_id: str) -> list[dict]:
+        return self._file_store.load_judged(channel_id)
+
+    def load_all_thread_buffers(self, channel_id: str) -> dict[str, list[dict]]:
+        return self._file_store.load_all_thread_buffers(channel_id)
+
+    def load_thread_buffer(self, channel_id: str, thread_ts: str) -> list[dict]:
+        return self._file_store.load_thread_buffer(channel_id, thread_ts)
+
+    def get_digest(self, channel_id: str) -> dict | None:
+        return self._file_store.get_digest(channel_id)
+
+    def save_digest(self, channel_id: str, content: str, meta: dict) -> None:
+        self._file_store.save_digest(channel_id, content, meta)
+
+    def count_judged_plus_pending_tokens(self, channel_id: str) -> int:
+        return self._file_store.count_judged_plus_pending_tokens(channel_id)
+
+    def clear_buffers(self, channel_id: str) -> None:
+        self._file_store.clear_buffers(channel_id)
+
+    def clear_judged(self, channel_id: str) -> None:
+        self._file_store.clear_judged(channel_id)
+
+    def append_judged(self, channel_id: str, messages: list[dict]) -> None:
+        self._file_store.append_judged(channel_id, messages)
 
     def append_thread_message(
         self, channel_id: str, thread_ts: str, message: dict
     ) -> None:
-        """Fire-and-forget: write a new thread message card to atom."""
+        """Dual-write: local file buffer + fire-and-forget atom card."""
+        self._file_store.append_thread_message(channel_id, thread_ts, message)
         msg = message if "thread_ts" in message else {**message, "thread_ts": thread_ts}
         self._fire_and_forget(self._write_pending_card(channel_id, msg))
 
     def upsert_thread_message(
         self, channel_id: str, thread_ts: str, message: dict
     ) -> None:
-        """Fire-and-forget: create or update a thread message card in atom."""
+        """Dual-write: local file buffer + fire-and-forget atom card."""
+        self._file_store.upsert_thread_message(channel_id, thread_ts, message)
         msg = message if "thread_ts" in message else {**message, "thread_ts": thread_ts}
         self._fire_and_forget(self._write_pending_card(channel_id, msg))
 
     def move_snapshot_to_judged(
-        self, channel_id: str, ts: str, staleness: str
+        self,
+        channel_id: str,
+        snapshot_ts: set[str],
+        snapshot_thread_ts: set[str] | None = None,
     ) -> None:
-        """Fire-and-forget: update staleness of a message card.
+        """Dual-write: file store move + fire-and-forget atom staleness update.
 
-        Uses _pending_staleness_ids (card DB ID) for the PATCH call.
-        Also updates all reply card IDs in the same thread.
+        Delegates to _file_store for the actual pending→judged file movement,
+        then updates atom card staleness for each ts in the snapshot.
         """
-        card_id = (self._pending_staleness_ids.get(channel_id) or {}).get(ts)
-        if not card_id:
-            logger.debug(
-                "move_snapshot_to_judged: no staleness card_id (channel=%s, ts=%s)",
-                channel_id,
-                ts,
-            )
-            return
-        self._fire_and_forget(self._patch_card_staleness(card_id, staleness))
+        self._file_store.move_snapshot_to_judged(
+            channel_id, snapshot_ts, snapshot_thread_ts
+        )
 
-        thread_cards = (self._thread_card_ids.get(channel_id) or {}).get(ts) or {}
-        for reply_ts, reply_card_id in thread_cards.items():
-            if reply_ts != ts:
-                self._fire_and_forget(self._patch_card_staleness(reply_card_id, staleness))
+        # Fire-and-forget: update atom card staleness for each message
+        for ts in snapshot_ts:
+            card_id = (self._pending_staleness_ids.get(channel_id) or {}).get(ts)
+            if not card_id:
+                continue
+            self._fire_and_forget(self._patch_card_staleness(card_id, "judged"))
+
+            thread_cards = (self._thread_card_ids.get(channel_id) or {}).get(ts) or {}
+            for reply_ts, reply_card_id in thread_cards.items():
+                if reply_ts != ts:
+                    self._fire_and_forget(
+                        self._patch_card_staleness(reply_card_id, "judged")
+                    )
+
+    async def compile_channel_context(
+        self, channel_id: str, *, limit: int | None = None
+    ) -> str:
+        """Compile channel knowledge tree into context text via atom HTTP API.
+
+        Called by plugin.py _on_before_execute hook and pipeline.py _execute_intervention.
+        Uses GET /api/tree/{node_id}/compile which returns {"markdown": "..."}.
+
+        Args:
+            channel_id: Slack channel ID
+            limit: Optional max number of leaf nodes to include
+        """
+        node_id = self._channel_nodes.get(channel_id)
+        if not node_id:
+            return ""
+        params = {}
+        if limit is not None:
+            params["limit"] = limit
+        result = await self._get_with_retry(
+            f"/api/tree/{node_id}/compile", params=params or None
+        )
+        if result and isinstance(result, dict):
+            return result.get("markdown", "")
+        return ""
 
     def write_interpretation(
         self,

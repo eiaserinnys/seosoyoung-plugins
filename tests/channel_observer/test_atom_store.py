@@ -15,16 +15,28 @@ from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
 # ============================================================================
 
 
+@pytest.fixture(autouse=True)
+def _mock_channel_store(monkeypatch):
+    """ChannelStore를 Mock으로 교체하여 파일 I/O 없이 테스트."""
+    mock_cls = MagicMock()
+    monkeypatch.setattr(
+        "seosoyoung_plugins.channel_observer.atom_store.ChannelStore", mock_cls
+    )
+    return mock_cls
+
+
 def make_store(
     user_name_resolver=None,
     base_url="http://atom.test",
     api_key="test-key",
     slack_root="root-node-id",
+    base_dir="/tmp/test-channel-store",
 ) -> AtomChannelStore:
     config = {
         "atom_base_url": base_url,
         "atom_api_key": api_key,
         "atom_slack_root_node_id": slack_root,
+        "base_dir": base_dir,
     }
     if user_name_resolver is not None:
         config["user_name_resolver"] = user_name_resolver
@@ -270,9 +282,9 @@ class TestWritePendingCard:
 
 
 class TestMoveSnapshotToJudged:
-    """staleness PATCH 호출이 _pending_staleness_ids 기반으로 발생하는지 검증."""
+    """staleness PATCH + file store 위임 검증."""
 
-    def test_fires_staleness_patch_for_known_card_ids(self):
+    def test_delegates_to_file_store_and_fires_staleness_patch(self):
         store = make_store()
         store._pending_card_ids.setdefault("C123", {})["ts-001"] = "node-001"
         store._pending_staleness_ids.setdefault("C123", {})["ts-001"] = "card-001"
@@ -290,7 +302,12 @@ class TestMoveSnapshotToJudged:
 
         store._fire_and_forget = fake_fire
 
-        store.move_snapshot_to_judged("C123", "ts-001", "judged")
+        store.move_snapshot_to_judged("C123", {"ts-001"}, None)
+
+        # file store delegation
+        store._file_store.move_snapshot_to_judged.assert_called_once_with(
+            "C123", {"ts-001"}, None
+        )
 
         assert len(fired) >= 1
         # Run the coroutine synchronously to verify the patch call
@@ -302,8 +319,10 @@ class TestMoveSnapshotToJudged:
         fired = []
         store._fire_and_forget = lambda c: fired.append(c)
 
-        store.move_snapshot_to_judged("C123", "ts-unknown", "judged")
+        store.move_snapshot_to_judged("C123", {"ts-unknown"}, None)
 
+        # file store should still be called
+        store._file_store.move_snapshot_to_judged.assert_called_once()
         assert len(fired) == 0
 
 
@@ -504,3 +523,197 @@ class TestWriteInterpretation:
         call_kwargs = store._create_knowledge_card.call_args
         staleness = call_kwargs[1].get("staleness") or call_kwargs[0][-1]
         assert staleness == "judged"
+
+
+# ============================================================================
+# TestDualWrite — append/upsert 이중 기록 검증
+# ============================================================================
+
+
+class TestDualWrite:
+    """메시지 쓰기 메서드가 file store + atom 양쪽 모두에 기록하는지 검증."""
+
+    def test_append_channel_message_dual_writes(self):
+        store = make_store()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        msg = {"ts": "1.0", "user": "U1", "text": "hello"}
+        store.append_channel_message("C123", msg)
+
+        store._file_store.append_channel_message.assert_called_once_with("C123", msg)
+        assert len(fired) == 1
+
+    def test_upsert_pending_dual_writes(self):
+        store = make_store()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        msg = {"ts": "1.0", "user": "U1", "text": "edited"}
+        store.upsert_pending("C123", msg)
+
+        store._file_store.upsert_pending.assert_called_once_with("C123", msg)
+        assert len(fired) == 1
+
+    def test_append_thread_message_dual_writes(self):
+        store = make_store()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        msg = {"ts": "2.0", "thread_ts": "1.0", "user": "U1", "text": "reply"}
+        store.append_thread_message("C123", "1.0", msg)
+
+        store._file_store.append_thread_message.assert_called_once_with(
+            "C123", "1.0", msg
+        )
+        assert len(fired) == 1
+
+    def test_upsert_thread_message_dual_writes(self):
+        store = make_store()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        msg = {"ts": "2.0", "thread_ts": "1.0", "user": "U1", "text": "edit reply"}
+        store.upsert_thread_message("C123", "1.0", msg)
+
+        store._file_store.upsert_thread_message.assert_called_once_with(
+            "C123", "1.0", msg
+        )
+        assert len(fired) == 1
+
+
+# ============================================================================
+# TestPipelineDelegation — 파이프라인 메서드 위임 검증
+# ============================================================================
+
+
+class TestPipelineDelegation:
+    """파이프라인 버퍼 메서드가 내부 _file_store로 위임되는지 검증."""
+
+    def test_load_pending_delegates(self):
+        store = make_store()
+        store._file_store.load_pending.return_value = [{"ts": "1"}]
+        result = store.load_pending("C123")
+        store._file_store.load_pending.assert_called_once_with("C123")
+        assert result == [{"ts": "1"}]
+
+    def test_load_judged_delegates(self):
+        store = make_store()
+        store._file_store.load_judged.return_value = []
+        result = store.load_judged("C123")
+        store._file_store.load_judged.assert_called_once_with("C123")
+        assert result == []
+
+    def test_count_pending_tokens_delegates(self):
+        store = make_store()
+        store._file_store.count_pending_tokens.return_value = 42
+        result = store.count_pending_tokens("C123")
+        store._file_store.count_pending_tokens.assert_called_once_with("C123")
+        assert result == 42
+
+    def test_count_judged_plus_pending_tokens_delegates(self):
+        store = make_store()
+        store._file_store.count_judged_plus_pending_tokens.return_value = 100
+        result = store.count_judged_plus_pending_tokens("C123")
+        assert result == 100
+
+    def test_clear_judged_delegates(self):
+        store = make_store()
+        store.clear_judged("C123")
+        store._file_store.clear_judged.assert_called_once_with("C123")
+
+    def test_append_judged_delegates(self):
+        store = make_store()
+        msgs = [{"ts": "1"}, {"ts": "2"}]
+        store.append_judged("C123", msgs)
+        store._file_store.append_judged.assert_called_once_with("C123", msgs)
+
+    def test_get_digest_delegates(self):
+        store = make_store()
+        store._file_store.get_digest.return_value = {"content": "digest"}
+        result = store.get_digest("C123")
+        assert result == {"content": "digest"}
+
+    def test_save_digest_delegates(self):
+        store = make_store()
+        store.save_digest("C123", "content", {"key": "val"})
+        store._file_store.save_digest.assert_called_once_with(
+            "C123", "content", {"key": "val"}
+        )
+
+    def test_update_reactions_delegates(self):
+        store = make_store()
+        store.update_reactions("C123", ts="1.0", emoji="thumbsup", user="U1", action="added")
+        store._file_store.update_reactions.assert_called_once_with(
+            "C123", ts="1.0", emoji="thumbsup", user="U1", action="added"
+        )
+
+
+# ============================================================================
+# TestCompileChannelContext — atom compile API 검증
+# ============================================================================
+
+
+class TestCompileChannelContext:
+    """compile_channel_context: atom HTTP API 호출 검증."""
+
+    @pytest.mark.asyncio
+    async def test_returns_markdown_from_api(self):
+        store = make_store()
+        store._channel_nodes["C123"] = "ch-node-id"
+        store._get_with_retry = AsyncMock(
+            return_value={"markdown": "# Channel Context\nsome content"}
+        )
+
+        result = await store.compile_channel_context("C123")
+
+        store._get_with_retry.assert_called_once_with(
+            "/api/tree/ch-node-id/compile", params=None
+        )
+        assert result == "# Channel Context\nsome content"
+
+    @pytest.mark.asyncio
+    async def test_passes_limit_param(self):
+        store = make_store()
+        store._channel_nodes["C123"] = "ch-node-id"
+        store._get_with_retry = AsyncMock(return_value={"markdown": "limited"})
+
+        result = await store.compile_channel_context("C123", limit=20)
+
+        store._get_with_retry.assert_called_once_with(
+            "/api/tree/ch-node-id/compile", params={"limit": 20}
+        )
+        assert result == "limited"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_channel_node(self):
+        store = make_store()
+        result = await store.compile_channel_context("C123")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_api_fails(self):
+        store = make_store()
+        store._channel_nodes["C123"] = "ch-node-id"
+        store._get_with_retry = AsyncMock(return_value=None)
+
+        result = await store.compile_channel_context("C123")
+        assert result == ""
+
+
+# ============================================================================
+# TestBaseDirRequired — base_dir 누락 시 ValueError 검증
+# ============================================================================
+
+
+class TestBaseDirRequired:
+    """config에 base_dir 없으면 ValueError 발생."""
+
+    def test_raises_without_base_dir(self, _mock_channel_store):
+        config = {
+            "atom_base_url": "http://atom.test",
+            "atom_api_key": "test-key",
+            "atom_slack_root_node_id": "root-node-id",
+        }
+        with pytest.raises(ValueError, match="base_dir"):
+            AtomChannelStore(config)
