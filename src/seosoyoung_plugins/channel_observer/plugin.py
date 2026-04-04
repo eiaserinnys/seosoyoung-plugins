@@ -14,6 +14,7 @@ import threading
 from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
+from seosoyoung.plugin_sdk import slack as _slack_sdk
 from seosoyoung_plugins.channel_observer import pipeline_lock
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
@@ -79,6 +80,23 @@ class ChannelObserverPlugin(Plugin):
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
 
+        # Atom knowledge store config (optional)
+        api_key_env = config.get("atom_api_key_env", "ATOM_API_KEY")
+        import os
+        atom_api_key = os.environ.get(api_key_env, "")
+        atom_base_url = config.get("atom_base_url", "")
+        atom_slack_root_node_id = config.get("atom_slack_root_node_id", "")
+        if atom_base_url and atom_api_key and atom_slack_root_node_id:
+            self._atom_config = {
+                "atom_base_url": atom_base_url,
+                "atom_api_key": atom_api_key,
+                "atom_slack_root_node_id": atom_slack_root_node_id,
+                "user_name_resolver": self._resolve_user_name,
+            }
+        else:
+            self._atom_config = None
+        self._atom_store = None
+
         # Runtime components (initialized in on_startup)
         self._store = None
         self._collector = None
@@ -108,6 +126,7 @@ class ChannelObserverPlugin(Plugin):
             "on_message": self._on_message,
             "on_startup": self._on_startup,
             "on_shutdown": self._on_shutdown,
+            "before_execute": self._on_before_execute,
         }
 
     # -- Hook handlers ---------------------------------------------------------
@@ -142,13 +161,23 @@ class ChannelObserverPlugin(Plugin):
             ChannelDigestScheduler,
         )
 
-        self._store = ChannelStore(base_dir=self._memory_path)
+        if self._atom_config:
+            from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
+            self._store = AtomChannelStore(config=self._atom_config)
+        else:
+            self._store = ChannelStore(base_dir=self._memory_path)
         self._collector = ChannelMessageCollector(
             store=self._store,
             target_channels=self._channels,
             bot_user_id=self._bot_user_id,
         )
         self._cooldown = InterventionHistory(base_dir=self._memory_path)
+
+        if self._atom_config:
+            from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
+            self._atom_store = AtomChannelStore(self._atom_config)
+            for ch in self._channels:
+                await self._ensure_channel_name(ch)
 
         if self._soulstream:
             self._observer_engine = ChannelObserver(
@@ -208,6 +237,41 @@ class ChannelObserverPlugin(Plugin):
             self._scheduler.stop()
         return HookResult.CONTINUE, None
 
+    async def _on_before_execute(
+        self, ctx: HookContext
+    ) -> tuple[HookResult, Any]:
+        """멘션 세션 실행 전 atom 채널 컨텍스트 주입."""
+        import asyncio as _asyncio
+        _compile_fn = getattr(self._store, "compile_channel_context", None) if self._store else None
+        if not callable(_compile_fn):
+            return HookResult.CONTINUE, None
+        if not _asyncio.iscoroutinefunction(_compile_fn):
+            return HookResult.CONTINUE, None
+
+        channel = ctx.args.get("channel", "")
+        if channel not in self._channels:
+            return HookResult.CONTINUE, None
+
+        context_items = ctx.args.get("context_items", [])
+
+        try:
+            atom_context = await _compile_fn(channel, limit=20)
+            if not atom_context:
+                return HookResult.CONTINUE, None
+
+            updated_items = [
+                item for item in context_items if item.get("key") != "channel_digest"
+            ]
+            updated_items.insert(0, {
+                "key": "channel_digest",
+                "label": "채널 컨텍스트",
+                "content": atom_context,
+            })
+            return HookResult.CONTINUE, {"context_items": updated_items}
+        except Exception as e:
+            logger.warning("ChannelObserver before_execute 실패 (무시): %s", e)
+            return HookResult.CONTINUE, None
+
     async def _on_message(
         self, ctx: HookContext
     ) -> tuple[HookResult, Any]:
@@ -241,6 +305,49 @@ class ChannelObserverPlugin(Plugin):
 
         # SKIP — don't stop the chain, let other plugins process
         return HookResult.SKIP, None
+
+    # -- Atom resolver helpers ---------------------------------------------------
+
+    async def _resolve_user_name(self, user_id: str) -> str:
+        """Resolve a Slack user ID to a display name via the plugin SDK backend."""
+        backend = _slack_sdk.get_backend()
+        if not backend:
+            return user_id
+        try:
+            profile = await backend.get_user_info(user_id)
+            if not profile:
+                return user_id
+            return profile.display_name or profile.real_name or user_id
+        except Exception:
+            return user_id
+
+    async def _ensure_channel_name(self, channel_id: str) -> None:
+        """Resolve and cache the display name for a channel in the atom store.
+
+        SlackBackend protocol does not expose conversations_info, so we access
+        backend._client (synchronous slack_sdk.WebClient) directly.
+        This is an intentional design decision: guarded with hasattr + try/except
+        to ensure isolation from the rest of the startup flow.
+        """
+        backend = _slack_sdk.get_backend()
+        if not backend or not hasattr(backend, "_client"):
+            logger.warning(
+                "_ensure_channel_name: backend 없음, channel_id=%s를 그대로 사용",
+                channel_id,
+            )
+            return
+        try:
+            result = backend._client.conversations_info(channel=channel_id)
+            display_name = (
+                result.get("channel", {}).get("name_normalized")
+                or result.get("channel", {}).get("name")
+                or channel_id
+            )
+            self._atom_store.set_channel_name(channel_id, display_name)
+        except Exception as e:
+            logger.warning(
+                "_ensure_channel_name 실패 (channel_id=%s): %s", channel_id, e
+            )
 
     # -- Reaction collection (called from message handler) ---------------------
 

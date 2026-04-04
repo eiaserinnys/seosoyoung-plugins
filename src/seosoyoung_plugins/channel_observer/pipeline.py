@@ -8,6 +8,7 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 5. pending을 judged로 이동
 """
 
+import asyncio
 import logging
 import math
 import random
@@ -879,12 +880,24 @@ async def _execute_intervene(
 
     prompt = "(채널 개입 트리거)"
 
-    context_items = [
-        {
+    # atom store인 경우 compile_subtree로 채널 컨텍스트 구성
+    _compile_fn = getattr(store, "compile_channel_context", None)
+    if callable(_compile_fn) and asyncio.iscoroutinefunction(_compile_fn):
+        atom_context = await _compile_fn(channel_id, limit=20)
+        channel_context_item = {
+            "key": "channel_digest",
+            "label": "채널 컨텍스트",
+            "content": atom_context,
+        }
+    else:
+        channel_context_item = {
             "key": "channel_digest",
             "label": "채널 요약",
             "content": digest if digest else "",
-        },
+        }
+
+    context_items = [
+        channel_context_item,
         {
             "key": "thread_context",
             "label": "스레드 맥락",
