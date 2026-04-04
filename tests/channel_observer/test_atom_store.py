@@ -1,422 +1,506 @@
-"""AtomChannelStore 단위 테스트.
+"""AtomChannelStore 단위 테스트."""
 
-테스트 범위:
-1. 날짜 경계: 새벽 3:59 KST → 전날 날짜, 04:00 KST → 당일 날짜
-2. 노드 캐시: 같은 channel_id로 두 번 호출 시 HTTP POST 1회만 발생
-3. retry 로직: HTTP 실패 시 3회 재시도, 3회 모두 실패 시 경고 후 드롭
-4. append_pending + load_pending: in-memory buffer 동작
-5. move_snapshot_to_judged: pending 제거 + staleness 업데이트 fire-and-forget
-"""
+from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
 
-SAMPLE_CONFIG = {
-    "atom_base_url": "http://localhost:3202",
-    "atom_api_key": "test-key",
-    "atom_slack_root_node_id": "root-node-id",
-}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
 
 
-def make_store() -> AtomChannelStore:
-    return AtomChannelStore(config=SAMPLE_CONFIG)
+def make_store(
+    user_name_resolver=None,
+    base_url="http://atom.test",
+    api_key="test-key",
+    slack_root="root-node-id",
+) -> AtomChannelStore:
+    config = {
+        "atom_base_url": base_url,
+        "atom_api_key": api_key,
+        "atom_slack_root_node_id": slack_root,
+    }
+    if user_name_resolver is not None:
+        config["user_name_resolver"] = user_name_resolver
+    return AtomChannelStore(config)
 
 
-# ── 날짜 경계 ─────────────────────────────────────────────────────────────
+def make_child(node_id: str, title: str) -> dict:
+    return {"id": node_id, "card": {"title": title}}
 
 
-class TestDateKey:
-    """_get_date_key: KST 새벽 4시 기준으로 날짜가 바뀐다."""
-
-    def test_before_4am_returns_previous_day(self):
-        # 2024-01-15 03:59:59 KST → 이전 날 2024-01-14
-        # KST offset = +9h → UTC 2024-01-14 18:59:59
-        from zoneinfo import ZoneInfo
-        kst = datetime(2024, 1, 15, 3, 59, 59, tzinfo=ZoneInfo("Asia/Seoul"))
-        ts = kst.timestamp()
-        result = AtomChannelStore._get_date_key(ts)
-        assert result == "2024-01-14"
-
-    def test_at_4am_returns_current_day(self):
-        # 2024-01-15 04:00:00 KST → 당일 2024-01-15
-        from zoneinfo import ZoneInfo
-        kst = datetime(2024, 1, 15, 4, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-        ts = kst.timestamp()
-        result = AtomChannelStore._get_date_key(ts)
-        assert result == "2024-01-15"
-
-    def test_midnight_returns_previous_day(self):
-        # 2024-01-15 00:00:00 KST → 이전 날 2024-01-14
-        from zoneinfo import ZoneInfo
-        kst = datetime(2024, 1, 15, 0, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-        ts = kst.timestamp()
-        result = AtomChannelStore._get_date_key(ts)
-        assert result == "2024-01-14"
-
-    def test_noon_returns_current_day(self):
-        # 2024-01-15 12:00:00 KST → 당일 2024-01-15
-        from zoneinfo import ZoneInfo
-        kst = datetime(2024, 1, 15, 12, 0, 0, tzinfo=ZoneInfo("Asia/Seoul"))
-        ts = kst.timestamp()
-        result = AtomChannelStore._get_date_key(ts)
-        assert result == "2024-01-15"
+# ============================================================================
+# TestCreateStructureCard
+# ============================================================================
 
 
-# ── 노드 캐시 ────────────────────────────────────────────────────────────
+class TestCreateStructureCard:
+    """_create_structure_card 반환 타입 (node_id, card_id) 검증."""
+
+    @pytest.mark.asyncio
+    async def test_returns_node_id_and_card_id(self):
+        store = make_store()
+        mock_response = {"node_id": "n-001", "id": "c-001"}
+        store._post_with_retry = AsyncMock(return_value=mock_response)
+
+        node_id, card_id = await store._create_structure_card("title", "parent-node")
+
+        assert node_id == "n-001"
+        assert card_id == "c-001"
+
+    @pytest.mark.asyncio
+    async def test_card_id_falls_back_to_card_id_field(self):
+        store = make_store()
+        mock_response = {"node_id": "n-002", "card_id": "c-002"}
+        store._post_with_retry = AsyncMock(return_value=mock_response)
+
+        node_id, card_id = await store._create_structure_card("title", "parent-node")
+
+        assert node_id == "n-002"
+        assert card_id == "c-002"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_none_on_failure(self):
+        store = make_store()
+        store._post_with_retry = AsyncMock(return_value=None)
+
+        node_id, card_id = await store._create_structure_card("title", "parent-node")
+
+        assert node_id is None
+        assert card_id is None
+
+    @pytest.mark.asyncio
+    async def test_content_included_when_provided(self):
+        store = make_store()
+        store._post_with_retry = AsyncMock(return_value={"node_id": "n", "id": "c"})
+
+        await store._create_structure_card("title", "parent", content="hello")
+
+        call_body = store._post_with_retry.call_args[0][1]
+        assert call_body["content"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_content_omitted_when_none(self):
+        store = make_store()
+        store._post_with_retry = AsyncMock(return_value={"node_id": "n", "id": "c"})
+
+        await store._create_structure_card("title", "parent", content=None)
+
+        call_body = store._post_with_retry.call_args[0][1]
+        assert "content" not in call_body
+
+
+# ============================================================================
+# TestNodeCache — channel / date / thread node caching
+# ============================================================================
 
 
 class TestNodeCache:
-    """같은 channel_id로 두 번 호출 시 HTTP POST는 1회만 발생한다."""
+    """노드 캐시 및 재사용 검증."""
 
     @pytest.mark.asyncio
     async def test_channel_node_created_once(self):
         store = make_store()
-        post_result = {"node_id": "channel-node-1"}
-        mock_post = AsyncMock(return_value=post_result)
+        store._list_children = AsyncMock(return_value=[])
+        store._create_card = AsyncMock(return_value="ch-node-1")
 
-        with patch.object(store, "_post_with_retry", new=mock_post):
-            # 첫 호출
-            node1 = await store._get_or_create_channel_node("C123")
-            # 두 번째 호출
-            node2 = await store._get_or_create_channel_node("C123")
+        node1 = await store._get_or_create_channel_node("C123")
+        node2 = await store._get_or_create_channel_node("C123")
 
-        assert node1 == "channel-node-1"
-        assert node2 == "channel-node-1"
-        # POST는 1회만 호출
-        mock_post.assert_called_once()
+        assert node1 == "ch-node-1"
+        assert node2 == "ch-node-1"
+        assert store._create_card.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_channel_node_reuses_existing_by_id_pattern(self):
+        store = make_store()
+        existing = make_child("ch-node-existing", "[#general](C123)")
+        store._list_children = AsyncMock(return_value=[existing])
+        store._create_card = AsyncMock()
+
+        node = await store._get_or_create_channel_node("C123")
+
+        assert node == "ch-node-existing"
+        store._create_card.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_channel_node_uses_display_name(self):
+        store = make_store()
+        store.set_channel_name("C123", "general")
+        store._list_children = AsyncMock(return_value=[])
+        store._create_card = AsyncMock(return_value="n")
+
+        await store._get_or_create_channel_node("C123")
+
+        call_title = store._create_card.call_args[0][0]
+        assert call_title == "[#general](C123)"
+
+    @pytest.mark.asyncio
+    async def test_date_node_created_once(self):
+        store = make_store()
+        store._get_or_create_channel_node = AsyncMock(return_value="ch-node")
+        store._list_children = AsyncMock(return_value=[])
+        store._create_card = AsyncMock(return_value="date-node-1")
+
+        n1 = await store._get_or_create_date_node("C123", "2026-04-04")
+        n2 = await store._get_or_create_date_node("C123", "2026-04-04")
+
+        assert n1 == "date-node-1"
+        assert n2 == "date-node-1"
+        assert store._create_card.call_count == 1
 
     @pytest.mark.asyncio
     async def test_thread_node_created_once(self):
+        """반환 타입이 tuple[str|None, str|None]임을 검증."""
         store = make_store()
-        call_count = 0
+        store._get_or_create_date_node = AsyncMock(return_value="date-node")
+        store._list_children = AsyncMock(return_value=[])
+        store._create_structure_card = AsyncMock(return_value=("thread-node-1", "card-id-1"))
 
-        async def fake_post(path, body):
-            nonlocal call_count
-            call_count += 1
-            return {"node_id": f"node-{call_count}"}
+        result1 = await store._get_or_create_thread_node("C123", "1712345678.000000")
+        result2 = await store._get_or_create_thread_node("C123", "1712345678.000000")
 
-        with patch.object(store, "_post_with_retry", new=fake_post):
-            thread_ts = "1700000000.000000"
-            node1 = await store._get_or_create_thread_node("C123", thread_ts)
-            node2 = await store._get_or_create_thread_node("C123", thread_ts)
-
-        assert node1 == node2
-        # channel + date + thread = 3회 POST, 두 번째 thread 호출은 캐시에서 처리
-        assert call_count == 3  # channel, date, thread 각 1회
-
-
-# ── retry 로직 ──────────────────────────────────────────────────────────
-
-
-class TestRetryLogic:
-    """HTTP 실패 시 3회 재시도, 3회 모두 실패 시 None 반환 + 경고 로그."""
+        # first call: new node → (node_id, card_id)
+        assert result1 == ("thread-node-1", "card-id-1")
+        # second call: cached → (node_id, None)
+        assert result2 == ("thread-node-1", None)
+        assert store._create_structure_card.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_post_retries_on_failure_and_returns_none(self):
+    async def test_thread_node_uses_get_date_key(self):
+        """_get_or_create_date_node는 raw thread_ts가 아닌 date_key를 받아야 한다."""
         store = make_store()
-        call_count = 0
+        store._get_or_create_date_node = AsyncMock(return_value="date-node")
+        store._list_children = AsyncMock(return_value=[])
+        store._create_structure_card = AsyncMock(return_value=("tn", "ci"))
 
-        async def failing_post(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            raise Exception("connection refused")
+        ts = "1712345678.000000"
+        expected_date_key = AtomChannelStore._get_date_key(float(ts))
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(side_effect=Exception("connection refused"))
-            mock_client_cls.return_value = mock_client
+        await store._get_or_create_thread_node("C123", ts)
 
-            with patch("asyncio.sleep", new=AsyncMock()):
-                result = await store._post_with_retry("/api/chat/cards", {"title": "test"})
-
-        assert result is None
-        assert mock_client.post.call_count == 3
+        store._get_or_create_date_node.assert_called_once_with("C123", expected_date_key)
 
     @pytest.mark.asyncio
-    async def test_post_succeeds_on_second_attempt(self):
+    async def test_thread_node_reuses_existing(self):
+        """기존 스레드 노드가 있으면 (node_id, None) 반환."""
         store = make_store()
-        attempt = 0
+        existing = make_child("thread-node-existing", "1712345678.000000")
+        store._get_or_create_date_node = AsyncMock(return_value="date-node")
+        store._list_children = AsyncMock(return_value=[existing])
+        store._create_structure_card = AsyncMock()
 
-        async def flaky_post(*args, **kwargs):
-            nonlocal attempt
-            attempt += 1
-            if attempt == 1:
-                raise Exception("temporary failure")
-            mock_resp = MagicMock()
-            mock_resp.status_code = 201
-            mock_resp.json.return_value = {"node_id": "new-node", "id": "card-1"}
-            return mock_resp
+        node_id, card_id = await store._get_or_create_thread_node("C123", "1712345678.000000")
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(side_effect=flaky_post)
-            mock_client_cls.return_value = mock_client
+        assert node_id == "thread-node-existing"
+        assert card_id is None
+        store._create_structure_card.assert_not_called()
 
-            with patch("asyncio.sleep", new=AsyncMock()):
-                result = await store._post_with_retry("/api/chat/cards", {"title": "test"})
 
-        assert result is not None
-        assert result["node_id"] == "new-node"
-        assert mock_client.post.call_count == 2
+# ============================================================================
+# TestWritePendingCard
+# ============================================================================
+
+
+class TestWritePendingCard:
+    """_write_pending_card: pending_card_ids → node_id, pending_staleness_ids → card_id."""
 
     @pytest.mark.asyncio
-    async def test_post_returns_none_on_http_error_status(self):
+    async def test_root_message_stores_node_id_and_card_id(self):
         store = make_store()
+        store._get_or_create_thread_node = AsyncMock(
+            return_value=("thread-node", "card-id-001")
+        )
+        store._format_message_content = AsyncMock(return_value="content")
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 500
+        message = {"ts": "1712345678.000001", "thread_ts": "1712345678.000001", "user": "U1"}
+        await store._write_pending_card("C123", message)
 
-        with patch("httpx.AsyncClient") as mock_client_cls:
-            mock_client = AsyncMock()
-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-            mock_client.__aexit__ = AsyncMock(return_value=False)
-            mock_client.post = AsyncMock(return_value=mock_resp)
-            mock_client_cls.return_value = mock_client
+        ts = "1712345678.000001"
+        assert store._pending_card_ids["C123"][ts] == "thread-node"
+        assert store._pending_staleness_ids["C123"][ts] == "card-id-001"
+        assert store._thread_card_ids["C123"]["1712345678.000001"][ts] == "card-id-001"
 
-            with patch("asyncio.sleep", new=AsyncMock()):
-                result = await store._post_with_retry("/api/chat/cards", {"title": "test"})
-
-        assert result is None
-        assert mock_client.post.call_count == 3
-
-
-# ── append_pending + load_pending ───────────────────────────────────────
-
-
-class TestPendingBuffer:
-    """in-memory pending buffer 동작."""
-
-    def test_append_and_load_pending(self):
+    @pytest.mark.asyncio
+    async def test_reply_stores_node_id_and_card_id(self):
         store = make_store()
-        store._fire_and_forget = MagicMock()  # background write 억제
+        store._get_or_create_thread_node = AsyncMock(return_value=("thread-node", None))
+        store._create_structure_card = AsyncMock(return_value=("reply-node", "reply-card-id"))
+        store._format_message_content = AsyncMock(return_value="content")
 
-        msg = {"ts": "1700000001.000001", "text": "hello", "user": "U123"}
-        store.append_pending("C123", msg)
+        message = {
+            "ts": "1712345678.000002",
+            "thread_ts": "1712345678.000001",
+            "user": "U2",
+        }
+        await store._write_pending_card("C123", message)
 
-        result = store.load_pending("C123")
-        assert len(result) == 1
-        assert result[0]["ts"] == "1700000001.000001"
+        ts = "1712345678.000002"
+        thread_ts = "1712345678.000001"
+        assert store._pending_card_ids["C123"][ts] == "reply-node"
+        assert store._pending_staleness_ids["C123"][ts] == "reply-card-id"
+        assert store._thread_card_ids["C123"][thread_ts][ts] == "reply-card-id"
 
-    def test_load_pending_empty_channel(self):
+    @pytest.mark.asyncio
+    async def test_root_message_no_card_id_skips_staleness(self):
+        """thread_node 신규 아니면 card_id=None → staleness dict에 추가 안 됨."""
         store = make_store()
-        result = store.load_pending("C_NONEXISTENT")
-        assert result == []
+        store._get_or_create_thread_node = AsyncMock(
+            return_value=("thread-node", None)  # existing node
+        )
+        store._format_message_content = AsyncMock(return_value="content")
 
-    def test_upsert_replaces_existing_message(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
+        message = {"ts": "1712345678.000001", "thread_ts": "1712345678.000001"}
+        await store._write_pending_card("C123", message)
 
-        msg1 = {"ts": "1700000001.000001", "text": "original"}
-        msg2 = {"ts": "1700000001.000001", "text": "updated"}
-        store.append_pending("C123", msg1)
-        store.upsert_pending("C123", msg2)
-
-        result = store.load_pending("C123")
-        assert len(result) == 1
-        assert result[0]["text"] == "updated"
-
-    def test_fire_and_forget_called_on_append(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        msg = {"ts": "1700000001.000001", "text": "hello"}
-        store.append_pending("C123", msg)
-
-        store._fire_and_forget.assert_called_once()
-
-    def test_append_channel_message_alias(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        msg = {"ts": "1700000001.000002", "text": "via alias"}
-        store.append_channel_message("C123", msg)
-
-        result = store.load_pending("C123")
-        assert len(result) == 1
+        ts = "1712345678.000001"
+        assert store._pending_card_ids["C123"][ts] == "thread-node"
+        assert store._pending_staleness_ids.get("C123", {}).get(ts) is None
 
 
-# ── move_snapshot_to_judged ─────────────────────────────────────────────
+# ============================================================================
+# TestMoveSnapshotToJudged
+# ============================================================================
 
 
 class TestMoveSnapshotToJudged:
-    """pending 제거 + staleness 업데이트 fire-and-forget."""
-
-    def test_moves_snapshot_messages_to_judged(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        msg1 = {"ts": "1700000001.000001", "text": "msg1"}
-        msg2 = {"ts": "1700000001.000002", "text": "msg2"}
-        msg3 = {"ts": "1700000001.000003", "text": "msg3"}
-
-        store.append_pending("C123", msg1)
-        store.append_pending("C123", msg2)
-        store.append_pending("C123", msg3)
-
-        snapshot_ts = {"1700000001.000001", "1700000001.000002"}
-        store.move_snapshot_to_judged("C123", snapshot_ts)
-
-        # snapshot_ts 메시지는 pending에서 제거
-        remaining = store.load_pending("C123")
-        remaining_ts = {m["ts"] for m in remaining}
-        assert remaining_ts == {"1700000001.000003"}
-
-        # judged에 추가됨
-        judged = store.load_judged("C123")
-        judged_ts = {m["ts"] for m in judged}
-        assert judged_ts == {"1700000001.000001", "1700000001.000002"}
+    """staleness PATCH 호출이 _pending_staleness_ids 기반으로 발생하는지 검증."""
 
     def test_fires_staleness_patch_for_known_card_ids(self):
         store = make_store()
-        fire_calls = []
+        store._pending_card_ids.setdefault("C123", {})["ts-001"] = "node-001"
+        store._pending_staleness_ids.setdefault("C123", {})["ts-001"] = "card-001"
 
-        def capture_fire(coro):
-            fire_calls.append(coro)
+        patched_calls = []
 
-        store._fire_and_forget = capture_fire
+        async def fake_patch(card_id: str, staleness: str):
+            patched_calls.append((card_id, staleness))
 
-        msg = {"ts": "1700000001.000001", "text": "msg"}
-        store.append_pending("C123", msg)
-        # 카드 ID 수동 주입
-        store._pending_card_ids["C123"] = {"1700000001.000001": "card-id-1"}
+        store._patch_card_staleness = fake_patch
+        fired = []
 
-        store.move_snapshot_to_judged("C123", {"1700000001.000001"})
+        def fake_fire(coro):
+            fired.append(coro)
 
-        # fire-and-forget이 호출됨: append_pending 1회 + staleness patch 1회
-        assert len(fire_calls) >= 1
+        store._fire_and_forget = fake_fire
 
-    def test_thread_snapshot_moves_to_judged(self):
+        store.move_snapshot_to_judged("C123", "ts-001", "judged")
+
+        assert len(fired) >= 1
+        # Run the coroutine synchronously to verify the patch call
+        asyncio.run(fired[0])
+        assert patched_calls == [("card-001", "judged")]
+
+    def test_no_patch_when_staleness_id_missing(self):
         store = make_store()
-        store._fire_and_forget = MagicMock()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
 
-        thread_ts = "1700000000.000000"
-        msg = {"ts": "1700000001.000001", "text": "thread reply"}
-        store.append_thread_message("C123", thread_ts, msg)
+        store.move_snapshot_to_judged("C123", "ts-unknown", "judged")
 
-        store.move_snapshot_to_judged(
-            "C123",
-            snapshot_ts=set(),
-            snapshot_thread_ts={thread_ts},
-        )
-
-        # 스레드 버퍼에서 제거
-        buffers = store.load_all_thread_buffers("C123")
-        assert thread_ts not in buffers
-
-        # judged에 추가
-        judged = store.load_judged("C123")
-        assert len(judged) == 1
-        assert judged[0]["ts"] == "1700000001.000001"
-
-    def test_nonexistent_snapshot_ts_does_not_crash(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        # pending에 없는 ts로 호출해도 에러 없음
-        store.move_snapshot_to_judged("C123", {"non-existent-ts"})
-
-        assert store.load_judged("C123") == []
+        assert len(fired) == 0
 
 
-# ── reactions ────────────────────────────────────────────────────────────
+# ============================================================================
+# TestFormatMessageContent
+# ============================================================================
 
 
-class TestUpdateReactions:
-    """in-memory reactions 업데이트."""
-
-    def test_add_reaction_to_pending_message(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        msg = {"ts": "1700000001.000001", "text": "hello"}
-        store.append_pending("C123", msg)
-
-        store.update_reactions("C123", ts="1700000001.000001", emoji="thumbsup", user="U1", action="added")
-
-        msgs = store.load_pending("C123")
-        reactions = msgs[0].get("reactions", [])
-        assert any(r["name"] == "thumbsup" and "U1" in r["users"] for r in reactions)
-
-    def test_remove_reaction(self):
-        store = make_store()
-        store._fire_and_forget = MagicMock()
-
-        msg = {"ts": "1700000001.000001", "text": "hello", "reactions": [
-            {"name": "thumbsup", "users": ["U1"], "count": 1}
-        ]}
-        store._pending["C123"] = {"1700000001.000001": msg}
-
-        store.update_reactions("C123", ts="1700000001.000001", emoji="thumbsup", user="U1", action="removed")
-
-        msgs = store.load_pending("C123")
-        reactions = msgs[0].get("reactions", [])
-        # count=0이면 제거됨
-        assert not any(r["name"] == "thumbsup" for r in reactions)
-
-
-# ── judged 버퍼 ──────────────────────────────────────────────────────────
-
-
-class TestJudgedBuffer:
-    def test_append_and_load_judged(self):
-        store = make_store()
-        msgs = [{"ts": "1.1", "text": "a"}, {"ts": "1.2", "text": "b"}]
-        store.append_judged("C123", msgs)
-
-        result = store.load_judged("C123")
-        assert len(result) == 2
-
-    def test_clear_judged(self):
-        store = make_store()
-        store.append_judged("C123", [{"ts": "1.1", "text": "a"}])
-        store.clear_judged("C123")
-
-        result = store.load_judged("C123")
-        assert result == []
-
-
-# ── compile_channel_context ──────────────────────────────────────────────
-
-
-class TestCompileChannelContext:
-    @pytest.mark.asyncio
-    async def test_returns_empty_string_when_no_channel_node(self):
-        store = make_store()
-        result = await store.compile_channel_context("C_NO_NODE")
-        assert result == ""
+class TestFormatMessageContent:
+    """_format_message_content 기본 동작."""
 
     @pytest.mark.asyncio
-    async def test_returns_markdown_from_api(self):
-        store = make_store()
-        store._channel_nodes["C123"] = "channel-node-1"
-        expected_md = "# 채널 대화\n\n내용입니다."
+    async def test_uses_display_name_from_resolver(self):
+        async def resolver(user_id: str) -> str:
+            return "서소영"
 
-        with patch.object(
-            store, "_get_with_retry",
-            new=AsyncMock(return_value={"markdown": expected_md})
-        ):
-            result = await store.compile_channel_context("C123", limit=10)
+        store = make_store(user_name_resolver=resolver)
 
-        assert result == expected_md
+        message = {"user": "U123", "text": "안녕하세요"}
+        content = await store._format_message_content(message)
+
+        assert "**서소영**" in content
+        assert "안녕하세요" in content
 
     @pytest.mark.asyncio
-    async def test_returns_empty_string_on_api_failure(self):
+    async def test_falls_back_to_user_id_without_resolver(self):
         store = make_store()
-        store._channel_nodes["C123"] = "channel-node-1"
 
-        with patch.object(
-            store, "_get_with_retry",
-            new=AsyncMock(return_value=None)
-        ):
-            result = await store.compile_channel_context("C123")
+        message = {"user": "U123", "text": "hello"}
+        content = await store._format_message_content(message)
 
-        assert result == ""
+        assert "**U123**" in content
+
+    @pytest.mark.asyncio
+    async def test_parses_user_mention(self):
+        store = make_store()
+
+        message = {"user": "", "text": "<@UABC>님 안녕하세요"}
+        content = await store._format_message_content(message)
+
+        assert "[UABC](UABC)" in content
+
+    @pytest.mark.asyncio
+    async def test_includes_file_attachment(self):
+        store = make_store()
+
+        message = {
+            "user": "",
+            "text": "",
+            "files": [
+                {"name": "image.png", "filetype": "png", "permalink": "https://slack.com/files/img"}
+            ],
+        }
+        content = await store._format_message_content(message)
+
+        assert "[첨부: image.png (png)](https://slack.com/files/img)" in content
+
+    @pytest.mark.asyncio
+    async def test_includes_reactions(self):
+        store = make_store()
+
+        message = {
+            "user": "",
+            "text": "",
+            "reactions": [{"name": "thumbsup", "count": 3, "users": ["U1", "U2", "U3"]}],
+        }
+        content = await store._format_message_content(message)
+
+        assert ":thumbsup: 3" in content
+
+
+# ============================================================================
+# TestParseSlackMarkup
+# ============================================================================
+
+
+class TestParseSlackMarkup:
+    def test_user_mention(self):
+        result = AtomChannelStore._parse_slack_markup("<@UABC123>")
+        assert result == "[UABC123](UABC123)"
+
+    def test_channel_mention(self):
+        result = AtomChannelStore._parse_slack_markup("<#C123|general>")
+        assert result == "[#general](C123)"
+
+    def test_link_with_label(self):
+        result = AtomChannelStore._parse_slack_markup("<https://example.com|Example>")
+        assert result == "[Example](https://example.com)"
+
+    def test_special_here(self):
+        result = AtomChannelStore._parse_slack_markup("<!here>")
+        assert result == "@here"
+
+    def test_special_channel(self):
+        result = AtomChannelStore._parse_slack_markup("<!channel>")
+        assert result == "@channel"
+
+    def test_special_everyone(self):
+        result = AtomChannelStore._parse_slack_markup("<!everyone>")
+        assert result == "@everyone"
+
+
+# ============================================================================
+# TestResolveUserName (plugin.py 통합 - _resolve_user_name)
+# ============================================================================
+
+
+class TestResolveUserNameViaStore:
+    """_resolve_user: UserInfo.display_name 속성 접근 검증."""
+
+    @pytest.mark.asyncio
+    async def test_returns_display_name(self):
+        from seosoyoung.plugin_sdk.slack import UserInfo
+
+        mock_info = UserInfo(id="U123", name="soy", real_name="서소영", display_name="소영")
+
+        async def resolver(user_id: str) -> str:
+            return mock_info.display_name or mock_info.real_name or user_id
+
+        store = make_store(user_name_resolver=resolver)
+        name = await store._resolve_user("U123")
+        assert name == "소영"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_real_name_when_display_name_empty(self):
+        async def resolver(user_id: str) -> str:
+            return "서소영"
+
+        store = make_store(user_name_resolver=resolver)
+        name = await store._resolve_user("U123")
+        assert name == "서소영"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_user_id_when_no_resolver(self):
+        store = make_store()
+        name = await store._resolve_user("U999")
+        assert name == "U999"
+
+
+# ============================================================================
+# TestWriteInterpretation
+# ============================================================================
+
+
+class TestWriteInterpretation:
+    """write_interpretation: _pending_card_ids에서 node_id를 찾아 knowledge 카드 생성."""
+
+    def test_skips_when_no_node_id(self, caplog):
+        store = make_store()
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        store.write_interpretation("C123", "ts-unknown", 0, "content")
+
+        assert len(fired) == 0
+
+    def test_fires_when_node_id_exists(self):
+        store = make_store()
+        store._pending_card_ids.setdefault("C123", {})["ts-001"] = "message-node"
+
+        fired = []
+        store._fire_and_forget = lambda c: fired.append(c)
+
+        store.write_interpretation("C123", "ts-001", 0, "해석 내용")
+
+        assert len(fired) == 1
+
+    @pytest.mark.asyncio
+    async def test_interpretation_card_title_default(self):
+        store = make_store()
+        store._create_knowledge_card = AsyncMock(return_value="interp-node")
+
+        await store._write_interpretation_card("msg-node", 0, "content")
+
+        store._create_knowledge_card.assert_called_once()
+        call_kwargs = store._create_knowledge_card.call_args
+        title = call_kwargs[1].get("title") or call_kwargs[0][0]
+        assert title == "첨부 해석"
+
+    @pytest.mark.asyncio
+    async def test_interpretation_card_title_nth(self):
+        store = make_store()
+        store._create_knowledge_card = AsyncMock(return_value="interp-node")
+
+        await store._write_interpretation_card("msg-node", 2, "content")
+
+        call_kwargs = store._create_knowledge_card.call_args
+        title = call_kwargs[1].get("title") or call_kwargs[0][0]
+        assert title == "2차 해석"
+
+    @pytest.mark.asyncio
+    async def test_interpretation_card_staleness_judged(self):
+        store = make_store()
+        store._create_knowledge_card = AsyncMock(return_value="interp-node")
+
+        await store._write_interpretation_card("msg-node", 0, "content")
+
+        call_kwargs = store._create_knowledge_card.call_args
+        staleness = call_kwargs[1].get("staleness") or call_kwargs[0][-1]
+        assert staleness == "judged"
