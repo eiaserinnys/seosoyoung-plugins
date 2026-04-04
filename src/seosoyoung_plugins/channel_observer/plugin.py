@@ -174,8 +174,6 @@ class ChannelObserverPlugin(Plugin):
         self._cooldown = InterventionHistory(base_dir=self._memory_path)
 
         if self._atom_config:
-            from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
-            self._atom_store = AtomChannelStore(self._atom_config)
             for ch in self._channels:
                 await self._ensure_channel_name(ch)
 
@@ -343,7 +341,7 @@ class ChannelObserverPlugin(Plugin):
                 or result.get("channel", {}).get("name")
                 or channel_id
             )
-            self._atom_store.set_channel_name(channel_id, display_name)
+            self._store.set_channel_name(channel_id, display_name)
         except Exception as e:
             logger.warning(
                 "_ensure_channel_name 실패 (channel_id=%s): %s", channel_id, e
