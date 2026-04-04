@@ -439,6 +439,41 @@ class AtomChannelStore:
     # Public API
     # =========================================================================
 
+    def append_channel_message(self, channel_id: str, message: dict) -> None:
+        """Fire-and-forget: write a new root-message card to atom."""
+        self._fire_and_forget(self._write_pending_card(channel_id, message))
+
+    def upsert_pending(self, channel_id: str, message: dict) -> None:
+        """Fire-and-forget: create or update a root-message card in atom.
+
+        Called for message_changed events on channel root messages.
+        _write_pending_card is idempotent via _get_or_create_thread_node.
+        """
+        self._fire_and_forget(self._write_pending_card(channel_id, message))
+
+    def count_pending_tokens(self, channel_id: str) -> int:
+        """Atom store has no local pending buffer; always returns 0.
+
+        Messages are written directly to atom (fire-and-forget), so there
+        is no local buffer to count. The digest pipeline is not triggered
+        by token count in atom mode.
+        """
+        return 0
+
+    def update_reactions(
+        self,
+        channel_id: str,
+        *,
+        ts: str,
+        emoji: str,
+        user: str,
+        action: str,
+    ) -> None:
+        """Atom store does not persist reaction deltas; no-op.
+
+        Reaction counts are not stored in the atom knowledge tree.
+        """
+
     def append_thread_message(
         self, channel_id: str, thread_ts: str, message: dict
     ) -> None:
