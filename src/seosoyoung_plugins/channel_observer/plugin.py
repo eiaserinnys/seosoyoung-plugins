@@ -95,8 +95,6 @@ class ChannelObserverPlugin(Plugin):
             }
         else:
             self._atom_config = None
-        self._atom_store = None
-
         # Runtime components (initialized in on_startup)
         self._store = None
         self._collector = None
@@ -163,7 +161,8 @@ class ChannelObserverPlugin(Plugin):
 
         if self._atom_config:
             from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
-            self._store = AtomChannelStore(config=self._atom_config)
+            atom_config_with_base = {**self._atom_config, "base_dir": self._memory_path}
+            self._store = AtomChannelStore(config=atom_config_with_base)
         else:
             self._store = ChannelStore(base_dir=self._memory_path)
         self._collector = ChannelMessageCollector(
