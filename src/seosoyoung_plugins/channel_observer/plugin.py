@@ -84,13 +84,11 @@ class ChannelObserverPlugin(Plugin):
         self._atom_config: dict | None = None
         if self._atom_channel_store:
             import os
-            api_key = os.environ.get(
-                config.get("atom_api_key_env", "CHAT_WRITE_API_KEY"), ""
-            )
+            api_key_env = config.get("atom_api_key_env", "CHAT_WRITE_API_KEY")
             self._atom_config = {
                 "atom_base_url": config["atom_base_url"],
-                "atom_api_key": api_key,
-                "atom_slack_root_node_id": config.get("atom_slack_root_node_id", ""),
+                "atom_api_key": os.environ[api_key_env],
+                "atom_slack_root_node_id": config["atom_slack_root_node_id"],
             }
 
         # Runtime components (initialized in on_startup)
@@ -233,7 +231,9 @@ class ChannelObserverPlugin(Plugin):
         """멘션 세션 실행 전 atom 채널 컨텍스트 주입."""
         import asyncio as _asyncio
         _compile_fn = getattr(self._store, "compile_channel_context", None) if self._store else None
-        if not callable(_compile_fn) or not _asyncio.iscoroutinefunction(_compile_fn):
+        if not callable(_compile_fn):
+            return HookResult.CONTINUE, None
+        if not _asyncio.iscoroutinefunction(_compile_fn):
             return HookResult.CONTINUE, None
 
         channel = ctx.args.get("channel", "")

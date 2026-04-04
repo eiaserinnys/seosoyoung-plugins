@@ -165,10 +165,9 @@ class AtomChannelStore:
         self, title: str, parent_node_id: str, content: str = "",
         staleness: str = "uninterpreted",
     ) -> str | None:
-        """knowledge 카드를 생성하고 (card_id, node_id)를 반환.
+        """knowledge 카드를 생성하고 card_id를 반환.
 
         CreateCardInput에 staleness가 없으므로 POST 후 PATCH로 staleness 설정.
-        card_id를 반환한다 (PATCH에 사용).
         """
         body = {
             "card_type": "knowledge",
@@ -348,6 +347,15 @@ class AtomChannelStore:
         """pending 버퍼 로드."""
         return list(self._pending.get(channel_id, {}).values())
 
+    def clear_pending(self, channel_id: str) -> None:
+        """pending 버퍼 비우기."""
+        self._pending.pop(channel_id, None)
+        self._pending_card_ids.pop(channel_id, None)
+
+    def load_channel_buffer(self, channel_id: str) -> list[dict]:
+        """load_pending의 하위호환 별칭."""
+        return self.load_pending(channel_id)
+
     # ── 스레드 버퍼 ──────────────────────────────────────────────────
 
     def append_thread_message(
@@ -502,6 +510,19 @@ class AtomChannelStore:
     def count_buffer_tokens(self, channel_id: str) -> int:
         """count_pending_tokens의 하위호환 별칭."""
         return self.count_pending_tokens(channel_id)
+
+    def load_thread_buffer(self, channel_id: str, thread_ts: str) -> list[dict]:
+        """특정 스레드 버퍼 로드."""
+        return list(
+            self._thread_buffers.get(channel_id, {}).get(thread_ts, {}).values()
+        )
+
+    def clear_buffers(self, channel_id: str) -> None:
+        """pending + judged + 스레드 버퍼를 모두 비운다."""
+        self.clear_pending(channel_id)
+        self.clear_judged(channel_id)
+        self._thread_buffers.pop(channel_id, None)
+        self._thread_card_ids.pop(channel_id, None)
 
     # ── reactions ────────────────────────────────────────────────
 
