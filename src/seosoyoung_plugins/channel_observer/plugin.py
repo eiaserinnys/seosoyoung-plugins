@@ -84,7 +84,7 @@ class ChannelObserverPlugin(Plugin):
         self._atom_config: dict | None = None
         if self._atom_channel_store:
             import os
-            api_key_env = config.get("atom_api_key_env", "CHAT_WRITE_API_KEY")
+            api_key_env = config["atom_api_key_env"]  # 없으면 KeyError — 명시적 실패
             self._atom_config = {
                 "atom_base_url": config["atom_base_url"],
                 "atom_api_key": os.environ[api_key_env],
