@@ -185,7 +185,7 @@ async def observe_conversation(
     debug_channel: str = "",
     anchor_ts: str = "",
     slack_bot_token: str = "",
-    emoji_obs_complete: str = ":ssy-happy:",
+    emoji_obs_complete: str = ":white_check_mark:",
 ) -> bool:
     """매턴 Observer를 호출하여 세션 관찰 로그를 갱신하고 후보를 수집합니다.
 
@@ -410,7 +410,7 @@ async def _try_promote(
     token_counter: TokenCounter,
     anchor_ts: str = "",
     slack_bot_token: str = "",
-    emoji_obs_complete: str = ":ssy-happy:",
+    emoji_obs_complete: str = ":white_check_mark:",
 ) -> None:
     """후보 버퍼 토큰이 임계치를 넘으면 Promoter를 호출하고, 필요 시 Compactor도 호출."""
     try:

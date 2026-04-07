@@ -11,6 +11,7 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 import asyncio
 import logging
 import math
+import os
 import random
 import re
 from datetime import datetime, timezone
@@ -43,6 +44,16 @@ from seosoyoung_plugins.channel_observer.store import ChannelStore
 from seosoyoung_plugins.memory.token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
+
+
+def _intervention_thinking_emoji() -> str:
+    """개입 '생각 중' 이모지 — 호출 시점에 환경변수를 읽어 dotenv 로딩 순서에 무관하게 동작"""
+    return os.environ.get("EMOJI_INTERVENTION_THINKING", "thinking_face")
+
+
+def _intervention_complete_emoji() -> str:
+    """개입 완료 이모지 — 호출 시점에 환경변수를 읽어 dotenv 로딩 순서에 무관하게 동작"""
+    return os.environ.get("EMOJI_INTERVENTION_COMPLETE", "white_check_mark")
 
 
 def _judge_result_to_observer_result(
@@ -815,10 +826,10 @@ async def _execute_intervene(
     if reaction_ts:
         try:
             await slack.add_reaction(
-                channel=channel_id, ts=reaction_ts, emoji="ssy-thinking",
+                channel=channel_id, ts=reaction_ts, emoji=_intervention_thinking_emoji(),
             )
         except Exception as e:
-            logger.debug(f"ssy-thinking 이모지 추가 실패: {e}")
+            logger.debug(f"thinking 이모지 추가 실패: {e}")
 
     # 1. 갱신된 digest 로드
     digest_data = store.get_digest(channel_id)
@@ -1118,20 +1129,20 @@ async def _remove_thinking_reaction(channel_id: str, ts: str | None) -> None:
     if not ts:
         return
     try:
-        await slack.remove_reaction(channel=channel_id, ts=ts, emoji="ssy-thinking")
+        await slack.remove_reaction(channel=channel_id, ts=ts, emoji=_intervention_thinking_emoji())
     except Exception:
         pass
 
 
 async def _swap_thinking_to_happy(channel_id: str, ts: str | None) -> None:
-    """:ssy-thinking: 이모지를 :ssy-happy:로 교체합니다."""
+    """thinking 이모지를 complete 이모지로 교체합니다."""
     if not ts:
         return
     try:
-        await slack.remove_reaction(channel=channel_id, ts=ts, emoji="ssy-thinking")
+        await slack.remove_reaction(channel=channel_id, ts=ts, emoji=_intervention_thinking_emoji())
     except Exception:
         pass
     try:
-        await slack.add_reaction(channel=channel_id, ts=ts, emoji="ssy-happy")
+        await slack.add_reaction(channel=channel_id, ts=ts, emoji=_intervention_complete_emoji())
     except Exception as e:
-        logger.debug(f"ssy-happy 이모지 추가 실패: {e}")
+        logger.debug(f"complete 이모지 추가 실패: {e}")
