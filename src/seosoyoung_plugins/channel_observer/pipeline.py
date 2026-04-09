@@ -908,7 +908,8 @@ async def _execute_intervene(
         }
 
     context_items = [
-        channel_context_item,
+        # NOTE: atom 채널 컨텍스트(channel_digest)를 비활성화 — thread_context와 중복되고 토큰 소비가 큼
+        # channel_context_item,
         {
             "key": "thread_context",
             "label": "스레드 맥락",
