@@ -8,6 +8,8 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 5. pending을 judged로 이동
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
@@ -15,7 +17,10 @@ import os
 import random
 import re
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
 
 from seosoyoung.plugin_sdk import mention, slack, soulstream
 from seosoyoung.plugin_sdk.slack import Message
@@ -38,6 +43,8 @@ from seosoyoung_plugins.channel_observer.observer import (
 )
 from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
+    build_thread_context_system_prompt,
+    build_thread_context_user_prompt,
     get_channel_intervene_system_prompt,
 )
 from seosoyoung_plugins.channel_observer.store import ChannelStore
@@ -279,6 +286,74 @@ def _filter_mention_thread_actions(
     return filtered
 
 
+async def enrich_thread_contexts(
+    atom_store: "AtomChannelStore",
+    observer: ChannelObserver,
+    channel_id: str,
+) -> None:
+    """오늘 최근 15개 스레드에 맥락 지식 카드를 생성합니다.
+
+    맥락 카드가 없는 스레드만 LLM 분석 후 카드 생성.
+    atom_store 조회 또는 LLM 호출 실패는 개별적으로 건너뛰며 전체 흐름을 중단하지 않습니다.
+    """
+    try:
+        thread_infos = await atom_store.get_today_thread_infos(channel_id, limit=15)
+    except Exception as exc:
+        logger.warning("thread_infos 조회 실패 (%s): %s", channel_id, exc)
+        return
+
+    if not thread_infos:
+        return
+
+    missing = [t for t in thread_infos if t["context"] is None]
+    if not missing:
+        logger.debug("맥락 enrich 스킵 (%s): 모든 스레드에 맥락 카드 있음", channel_id)
+        return
+
+    logger.info("맥락 enrich 시작 (%s): %d개 스레드 분석", channel_id, len(missing))
+
+    for info in missing:
+        try:
+            full_content = await atom_store.get_thread_full_content(
+                info["thread_node_id"], root_content=info["root_content"]
+            )
+            if not full_content.strip():
+                continue
+
+            system_prompt = build_thread_context_system_prompt()
+            user_prompt = build_thread_context_user_prompt(full_content)
+
+            result = await observer.client.complete(
+                provider="openai",
+                model=observer.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=500,
+                client_id="thread-context",
+            )
+
+            context_text = result.content.strip() if result and result.content else ""
+            if context_text:
+                await atom_store.write_thread_context_async(
+                    info["thread_node_id"], context_text
+                )
+                logger.debug(
+                    "맥락 카드 생성 완료 (%s): thread_ts=%s", channel_id, info["thread_ts"]
+                )
+        except Exception as exc:
+            logger.warning(
+                "맥락 enrich 실패 (%s, thread=%s): %s",
+                channel_id,
+                info.get("thread_ts"),
+                exc,
+            )
+            continue
+
+    logger.info("맥락 enrich 완료 (%s): %d개 처리", channel_id, len(missing))
+
+
 async def run_channel_pipeline(
     store: ChannelStore,
     observer: ChannelObserver,
@@ -297,6 +372,7 @@ async def run_channel_pipeline(
     recent_messages_count: int = 5,
     intervene_model: str | None = None,
     folder_id: str | None = None,
+    atom_store=None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -422,6 +498,10 @@ async def run_channel_pipeline(
         f"judged {len(judged_messages)}건, "
         f"threads {len(judge_thread_buffers) if judge_thread_buffers else 0}건"
     )
+
+    # c-0) atom 맥락 카드 enrich (atom_store가 있을 때만)
+    if atom_store is not None:
+        await enrich_thread_contexts(atom_store, observer, channel_id)
 
     judge_result = await observer.judge(
         channel_id=channel_id,

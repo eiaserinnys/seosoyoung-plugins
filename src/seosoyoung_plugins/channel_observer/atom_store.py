@@ -618,3 +618,149 @@ class AtomChannelStore:
             content=content,
             staleness="judged",
         )
+
+    # =========================================================================
+    # Thread context enrichment (맥락 카드)
+    # =========================================================================
+
+    async def _get_channel_node_if_exists(self, channel_id: str) -> str | None:
+        """채널 노드가 이미 존재하면 node_id를 반환. 없으면 None (생성 안 함)."""
+        if channel_id in self._channel_nodes:
+            return self._channel_nodes[channel_id]
+        children = await self._list_children(self._slack_root_node_id)
+        for child in children:
+            if f"]({channel_id})" in child.get("card", {}).get("title", ""):
+                node_id = child["id"]
+                self._channel_nodes[channel_id] = node_id
+                return node_id
+        return None
+
+    async def _get_date_node_if_exists(self, channel_node_id: str, channel_id: str, date_key: str) -> str | None:
+        """date_node가 이미 존재하면 node_id를 반환. 없으면 None (생성 안 함)."""
+        cache = self._date_nodes.setdefault(channel_id, {})
+        if date_key in cache:
+            return cache[date_key]
+        children = await self._list_children(channel_node_id)
+        for child in children:
+            if child.get("card", {}).get("title") == date_key:
+                node_id = child["id"]
+                cache[date_key] = node_id
+                return node_id
+        return None
+
+    async def get_today_thread_infos(
+        self, channel_id: str, limit: int = 15
+    ) -> list[dict]:
+        """오늘 날짜 기준 최근 N개 스레드 정보를 반환합니다.
+
+        각 항목:
+          {
+            "thread_node_id": str,
+            "thread_ts": str,
+            "root_content": str,
+            "context": str | None,   # 🗒️ 맥락 knowledge 카드 content (없으면 None)
+          }
+
+        맥락 카드가 없는 스레드의 context는 None입니다.
+        date_node 또는 channel_node가 없으면 빈 리스트를 반환합니다 (생성하지 않음).
+        """
+        today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        channel_node = await self._get_channel_node_if_exists(channel_id)
+        if not channel_node:
+            return []
+
+        date_node = await self._get_date_node_if_exists(channel_node, channel_id, today_key)
+        if not date_node:
+            return []
+
+        thread_children = await self._list_children(date_node)
+
+        # structure 타입이고 title이 Unix timestamp 형식인 노드만
+        thread_nodes = []
+        for child in thread_children:
+            card = child.get("card", {})
+            if card.get("card_type") != "structure":
+                continue
+            title = card.get("title", "")
+            try:
+                float(title)
+            except (ValueError, TypeError):
+                continue
+            thread_nodes.append(child)
+
+        # timestamp 기준 내림차순 정렬 → 최신 limit개
+        thread_nodes.sort(key=lambda c: float(c["card"]["title"]), reverse=True)
+        thread_nodes = thread_nodes[:limit]
+
+        result = []
+        for node in thread_nodes:
+            thread_node_id = node["id"]
+            card = node.get("card", {})
+            thread_ts = card.get("title", "")
+            root_content = card.get("content", "")
+
+            # 자식 중 🗒️ 맥락 knowledge 카드 탐색
+            children = await self._list_children(thread_node_id)
+            context: str | None = None
+            for child in children:
+                child_card = child.get("card", {})
+                if (
+                    child_card.get("card_type") == "knowledge"
+                    and child_card.get("title") == "🗒️ 맥락"
+                ):
+                    context = child_card.get("content")
+                    break
+
+            result.append({
+                "thread_node_id": thread_node_id,
+                "thread_ts": thread_ts,
+                "root_content": root_content or "",
+                "context": context,
+            })
+
+        return result
+
+    async def get_thread_full_content(
+        self, thread_node_id: str, root_content: str = ""
+    ) -> str:
+        """스레드 전체 내용 (루트 + 답글)을 텍스트로 조합하여 반환합니다.
+
+        children 중 structure 타입만 답글로 간주하고, knowledge 타입은 제외합니다.
+
+        반환 형식:
+            [루트]
+            {root_content}
+
+            [답글 1]
+            {reply_1_content}
+            ...
+        """
+        parts: list[str] = []
+
+        if root_content:
+            parts.append(f"[루트]\n{root_content}")
+
+        children = await self._list_children(thread_node_id)
+        reply_index = 1
+        for child in children:
+            child_card = child.get("card", {})
+            if child_card.get("card_type") != "structure":
+                continue
+            content = child_card.get("content", "")
+            if content:
+                parts.append(f"[답글 {reply_index}]\n{content}")
+                reply_index += 1
+
+        return "\n\n".join(parts)
+
+    async def write_thread_context_async(
+        self, thread_node_id: str, context: str
+    ) -> None:
+        """스레드 노드에 🗒️ 맥락 knowledge 카드를 생성합니다 (await 가능)."""
+        await self._create_knowledge_card(
+            title="🗒️ 맥락",
+            parent_node_id=thread_node_id,
+            content=context,
+            staleness="judged",
+        )
