@@ -290,24 +290,6 @@ def _format_channel_messages(
     return "\n".join(lines)
 
 
-def build_thread_context_system_prompt() -> str:
-    """스레드 맥락 분석 시스템 프롬프트를 반환합니다."""
-    return (
-        "당신은 슬랙 채널의 대화 스레드를 분석하는 어시스턴트입니다.\n"
-        "주어진 스레드 내용을 읽고, 다음을 간결하게 정리하세요:\n"
-        "- 주제: 이 스레드에서 무슨 이야기가 오갔는가\n"
-        "- 핵심 내용: 중요한 결정, 정보, 감정, 맥락\n"
-        "- 참여자: 누가 어떤 입장/역할이었는가 (알 수 있는 경우)\n"
-        "- 결론/상태: 스레드가 어떻게 마무리되었거나 어떤 상태인가\n\n"
-        "200자 이내로 간결하게 작성하세요."
-    )
-
-
-def build_thread_context_user_prompt(thread_content: str) -> str:
-    """스레드 맥락 분석 사용자 프롬프트를 반환합니다."""
-    return f"다음 슬랙 스레드를 분석해주세요:\n\n{thread_content}"
-
-
 def _format_thread_messages(
     thread_buffers: dict[str, list[dict]],
     resolver: Optional[DisplayNameResolver] = None,
