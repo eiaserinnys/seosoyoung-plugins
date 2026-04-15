@@ -125,7 +125,6 @@ class ChannelObserverPlugin(Plugin):
             "on_message": self._on_message,
             "on_startup": self._on_startup,
             "on_shutdown": self._on_shutdown,
-            "before_execute": self._on_before_execute,
         }
 
     # -- Hook handlers ---------------------------------------------------------
@@ -235,41 +234,6 @@ class ChannelObserverPlugin(Plugin):
         if self._scheduler:
             self._scheduler.stop()
         return HookResult.CONTINUE, None
-
-    async def _on_before_execute(
-        self, ctx: HookContext
-    ) -> tuple[HookResult, Any]:
-        """멘션 세션 실행 전 atom 채널 컨텍스트 주입."""
-        import asyncio as _asyncio
-        _compile_fn = getattr(self._store, "compile_channel_context", None) if self._store else None
-        if not callable(_compile_fn):
-            return HookResult.CONTINUE, None
-        if not _asyncio.iscoroutinefunction(_compile_fn):
-            return HookResult.CONTINUE, None
-
-        channel = ctx.args.get("channel", "")
-        if channel not in self._channels:
-            return HookResult.CONTINUE, None
-
-        context_items = ctx.args.get("context_items", [])
-
-        try:
-            atom_context = await _compile_fn(channel, limit=20)
-            if not atom_context:
-                return HookResult.CONTINUE, None
-
-            updated_items = [
-                item for item in context_items if item.get("key") != "channel_digest"
-            ]
-            updated_items.insert(0, {
-                "key": "channel_digest",
-                "label": "채널 컨텍스트",
-                "content": atom_context,
-            })
-            return HookResult.CONTINUE, {"context_items": updated_items}
-        except Exception as e:
-            logger.warning("ChannelObserver before_execute 실패 (무시): %s", e)
-            return HookResult.CONTINUE, None
 
     async def _on_message(
         self, ctx: HookContext

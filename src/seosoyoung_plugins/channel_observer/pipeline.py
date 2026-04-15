@@ -899,25 +899,7 @@ async def _execute_intervene(
 
     prompt = "(채널 개입 트리거)"
 
-    # atom store인 경우 compile_subtree로 채널 컨텍스트 구성
-    _compile_fn = getattr(store, "compile_channel_context", None)
-    if callable(_compile_fn) and asyncio.iscoroutinefunction(_compile_fn):
-        atom_context = await _compile_fn(channel_id, limit=20)
-        channel_context_item = {
-            "key": "channel_digest",
-            "label": "채널 컨텍스트",
-            "content": atom_context,
-        }
-    else:
-        channel_context_item = {
-            "key": "channel_digest",
-            "label": "채널 요약",
-            "content": digest if digest else "",
-        }
-
     context_items = [
-        # NOTE: atom 채널 컨텍스트(channel_digest)를 비활성화 — thread_context와 중복되고 토큰 소비가 큼
-        # channel_context_item,
         {
             "key": "thread_context",
             "label": "스레드 맥락",
