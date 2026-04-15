@@ -45,8 +45,8 @@ def store(tmp_path):
 def sample_record():
     return MemoryRecord(
         thread_ts="1234567890.123456",
-        user_id="U08HWT0C6K1",
-        username="eias",
+        user_id="U00TEST0001",
+        username="testuser",
         observations=_make_obs_items([("🔴", "사용자는 커밋 메시지를 한글로 작성")]),
         observation_tokens=50,
         last_observed_at=datetime(2026, 2, 10, 9, 30, tzinfo=timezone.utc),
@@ -60,8 +60,8 @@ class TestMemoryRecord:
     def test_to_meta_dict(self, sample_record):
         meta = sample_record.to_meta_dict()
         assert meta["thread_ts"] == "1234567890.123456"
-        assert meta["user_id"] == "U08HWT0C6K1"
-        assert meta["username"] == "eias"
+        assert meta["user_id"] == "U00TEST0001"
+        assert meta["username"] == "testuser"
         assert meta["observation_tokens"] == 50
         assert meta["total_sessions_observed"] == 3
         assert meta["reflection_count"] == 0
