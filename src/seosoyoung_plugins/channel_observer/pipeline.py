@@ -297,6 +297,7 @@ async def run_channel_pipeline(
     recent_messages_count: int = 5,
     intervene_model: str | None = None,
     folder_id: str | None = None,
+    agent_id: str | None = None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -482,6 +483,7 @@ async def run_channel_pipeline(
                 recent_messages_count=recent_messages_count,
                 intervene_model=intervene_model,
                 folder_id=folder_id,
+                agent_id=agent_id,
             )
         else:
             # 하위호환: 단일 판단 경로
@@ -505,6 +507,7 @@ async def run_channel_pipeline(
                 recent_messages_count=recent_messages_count,
                 intervene_model=intervene_model,
                 folder_id=folder_id,
+                agent_id=agent_id,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
@@ -529,6 +532,7 @@ async def _handle_multi_judge(
     recent_messages_count: int = 5,
     intervene_model: str | None = None,
     folder_id: str | None = None,
+    agent_id: str | None = None,
     **kwargs,
 ) -> None:
     """복수 JudgeItem 처리: 이모지 일괄 + 개입 확률 판단"""
@@ -622,6 +626,7 @@ async def _handle_multi_judge(
                             recent_messages_count=recent_messages_count,
                             intervene_model=intervene_model,
                             folder_id=folder_id,
+                            agent_id=agent_id,
                         )
                     else:
                         await execute_interventions(channel_id, [action])
@@ -659,6 +664,7 @@ async def _handle_single_judge(
     recent_messages_count: int = 5,
     intervene_model: str | None = None,
     folder_id: str | None = None,
+    agent_id: str | None = None,
     **kwargs,
 ) -> None:
     """하위호환: 단일 JudgeResult 처리"""
@@ -761,6 +767,7 @@ async def _handle_single_judge(
                             recent_messages_count=recent_messages_count,
                             intervene_model=intervene_model,
                             folder_id=folder_id,
+                            agent_id=agent_id,
                         )
                 else:
                     await execute_interventions(channel_id, message_actions)
@@ -818,6 +825,7 @@ async def _execute_intervene(
     recent_messages_count: int = 5,
     intervene_model: str | None = None,
     folder_id: str | None = None,
+    agent_id: str | None = None,
     **kwargs,
 ) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
@@ -938,6 +946,7 @@ async def _execute_intervene(
             system_prompt=system_prompt,  # context_item 대신 실제 API system 파라미터로 전달
             model=intervene_model,
             folder_id=folder_id,
+            agent_id=agent_id,
         )
         if result.ok:
             response_text = result.output

@@ -77,6 +77,7 @@ class ChannelObserverPlugin(Plugin):
         self._periodic_sec: int = config.get("periodic_sec", 300)
         self._intervene_model: str | None = config.get("intervene_model", None)
         self._intervene_folder_id: str | None = config.get("folder_id", None)
+        self._intervene_agent_id: str | None = config.get("agent_id", None)
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
 
@@ -205,6 +206,7 @@ class ChannelObserverPlugin(Plugin):
                 recent_messages_count=self._recent_messages_count,
                 intervene_model=self._intervene_model,
                 folder_id=self._intervene_folder_id,
+                agent_id=self._intervene_agent_id,
             )
             self._scheduler.start()
 
@@ -455,6 +457,7 @@ class ChannelObserverPlugin(Plugin):
                             recent_messages_count=self._recent_messages_count,
                             intervene_model=self._intervene_model,
                             folder_id=self._intervene_folder_id,
+                            agent_id=self._intervene_agent_id,
                         )
                     )
                 finally:
