@@ -14,7 +14,6 @@ import threading
 from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
-from seosoyoung.plugin_sdk import slack as _slack_sdk
 from seosoyoung_plugins.channel_observer import pipeline_lock
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
@@ -81,21 +80,6 @@ class ChannelObserverPlugin(Plugin):
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
 
-        # Atom knowledge store config (optional)
-        api_key_env = config.get("atom_api_key_env", "ATOM_API_KEY")
-        import os
-        atom_api_key = os.environ.get(api_key_env, "")
-        atom_base_url = config.get("atom_base_url", "")
-        atom_slack_root_node_id = config.get("atom_slack_root_node_id", "")
-        if atom_base_url and atom_api_key and atom_slack_root_node_id:
-            self._atom_config = {
-                "atom_base_url": atom_base_url,
-                "atom_api_key": atom_api_key,
-                "atom_slack_root_node_id": atom_slack_root_node_id,
-                "user_name_resolver": self._resolve_user_name,
-            }
-        else:
-            self._atom_config = None
         # Runtime components (initialized in on_startup)
         self._store = None
         self._collector = None
@@ -159,22 +143,13 @@ class ChannelObserverPlugin(Plugin):
             ChannelDigestScheduler,
         )
 
-        if self._atom_config:
-            from seosoyoung_plugins.channel_observer.atom_store import AtomChannelStore
-            atom_config_with_base = {**self._atom_config, "base_dir": self._memory_path}
-            self._store = AtomChannelStore(config=atom_config_with_base)
-        else:
-            self._store = ChannelStore(base_dir=self._memory_path)
+        self._store = ChannelStore(base_dir=self._memory_path)
         self._collector = ChannelMessageCollector(
             store=self._store,
             target_channels=self._channels,
             bot_user_id=self._bot_user_id,
         )
         self._cooldown = InterventionHistory(base_dir=self._memory_path)
-
-        if self._atom_config:
-            for ch in self._channels:
-                await self._ensure_channel_name(ch)
 
         if self._soulstream:
             self._observer_engine = ChannelObserver(
@@ -268,49 +243,6 @@ class ChannelObserverPlugin(Plugin):
 
         # SKIP — don't stop the chain, let other plugins process
         return HookResult.SKIP, None
-
-    # -- Atom resolver helpers ---------------------------------------------------
-
-    async def _resolve_user_name(self, user_id: str) -> str:
-        """Resolve a Slack user ID to a display name via the plugin SDK backend."""
-        backend = _slack_sdk.get_backend()
-        if not backend:
-            return user_id
-        try:
-            profile = await backend.get_user_info(user_id)
-            if not profile:
-                return user_id
-            return profile.display_name or profile.real_name or user_id
-        except Exception:
-            return user_id
-
-    async def _ensure_channel_name(self, channel_id: str) -> None:
-        """Resolve and cache the display name for a channel in the atom store.
-
-        SlackBackend protocol does not expose conversations_info, so we access
-        backend._client (synchronous slack_sdk.WebClient) directly.
-        This is an intentional design decision: guarded with hasattr + try/except
-        to ensure isolation from the rest of the startup flow.
-        """
-        backend = _slack_sdk.get_backend()
-        if not backend or not hasattr(backend, "_client"):
-            logger.warning(
-                "_ensure_channel_name: backend 없음, channel_id=%s를 그대로 사용",
-                channel_id,
-            )
-            return
-        try:
-            result = backend._client.conversations_info(channel=channel_id)
-            display_name = (
-                result.get("channel", {}).get("name_normalized")
-                or result.get("channel", {}).get("name")
-                or channel_id
-            )
-            self._store.set_channel_name(channel_id, display_name)
-        except Exception as e:
-            logger.warning(
-                "_ensure_channel_name 실패 (channel_id=%s): %s", channel_id, e
-            )
 
     # -- Reaction collection (called from message handler) ---------------------
 

@@ -176,7 +176,7 @@ src/seosoyoung_plugins/
 │   ├── scheduler.py       # Periodic observation scheduling
 │   ├── store.py           # Observation state storage
 │   ├── intervention.py    # Autonomous message posting
-│   └── ...                # pipeline_lock, atom_store, prompts
+│   └── ...                # pipeline_lock, prompts
 ├── trello/                # Trello plugin
 │   ├── plugin.py          # Plugin entry point
 │   ├── watcher.py         # Board polling and change detection
