@@ -267,7 +267,10 @@ class TestRunChannelPipeline:
 
     @pytest.mark.asyncio
     async def test_judge_returns_none(self, store, channel_id, mock_plugin_sdk):
-        """judge가 None을 반환하면 파이프라인 중단"""
+        """judge가 None을 반환해도 스냅샷은 judged로 이동한다.
+
+        이동하지 않으면 스레드 버퍼가 pending에 남아 무한 루프를 유발한다.
+        """
         _fill_pending(store, channel_id)
 
         observer = FakeObserver()
@@ -282,8 +285,8 @@ class TestRunChannelPipeline:
             threshold_a=1,
         )
 
-        # pending은 이동되지 않음 (judge 실패)
-        assert len(store.load_pending(channel_id)) > 0
+        # judge 실패여도 스냅샷은 judged로 이동해야 한다 (무한 루프 방지)
+        assert len(store.load_pending(channel_id)) == 0
 
     @pytest.mark.asyncio
     async def test_react_action_executed(self, store, channel_id, mock_plugin_sdk):

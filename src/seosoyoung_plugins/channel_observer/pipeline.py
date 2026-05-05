@@ -424,6 +424,18 @@ async def run_channel_pipeline(
         f"threads {len(judge_thread_buffers) if judge_thread_buffers else 0}건"
     )
 
+    # Bug 2 fix: 필터링 후 판단할 메시지가 없으면 judge 호출을 건너뛴다.
+    # count_pending_tokens()는 스레드 버퍼를 합산하므로 threshold를 통과하지만
+    # 멘션 필터링이나 실제 load_pending이 빈 경우 빈 LLM 호출이 발생한다.
+    # thread_buffers는 컨텍스트일 뿐 판단 대상은 judge_pending이다.
+    if not judge_pending:
+        logger.debug(
+            f"판단할 메시지 없음, judge 스킵 ({channel_id}): "
+            f"pending {len(pending_messages)}건은 모두 필터링됨"
+        )
+        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
+        return
+
     judge_result = await observer.judge(
         channel_id=channel_id,
         digest=current_digest,
@@ -431,11 +443,14 @@ async def run_channel_pipeline(
         pending_messages=judge_pending,
         thread_buffers=judge_thread_buffers,
         bot_user_id=bot_user_id,
-        
+
     )
 
+    # Bug 1 fix: judge가 None이어도 스냅샷을 judged로 이동해야 한다.
+    # 이동하지 않으면 스레드 버퍼가 pending에 영원히 남아 무한 루프를 유발한다.
     if judge_result is None:
         logger.warning(f"judge가 None 반환 ({channel_id})")
+        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
         return
 
     # d-0a) Bug D: pending ts에 없는 JudgeItem 필터링
