@@ -314,6 +314,7 @@ class TrelloPlugin(Plugin):
                     logger.error("Session compact error: %s", e)
 
             # Run Claude
+            # 사용자가 슬랙 리액션으로 트리거한 직접 실행 경로이므로 source는 "slack"
             result = await soulstream.run(
                 prompt=prompt,
                 channel=channel,
@@ -321,6 +322,7 @@ class TrelloPlugin(Plugin):
                 session_id=session_id,
                 role="admin",
                 context=context,
+                caller_info={"source": "slack"},
             )
 
             if not result.ok:

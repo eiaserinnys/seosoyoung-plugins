@@ -716,6 +716,7 @@ class TrelloWatcher:
                         dm_thread_ts=dm_thread_ts,
                         trello_card=tracked,
                         context=context,
+                        caller_info={"source": "trello_watcher"},
                     )
                 )
 

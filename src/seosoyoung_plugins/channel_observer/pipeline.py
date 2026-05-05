@@ -944,6 +944,7 @@ async def _execute_intervene(
             model=intervene_model,
             folder_id=folder_id,
             agent_id=agent_id,
+            caller_info={"source": "channel_observer"},
         )
         if result.ok:
             response_text = result.output
