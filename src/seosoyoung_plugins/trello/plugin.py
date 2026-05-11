@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung.plugin_sdk import slack, soulstream
+from seosoyoung.plugin_sdk.caller_info import build_slack_caller_info  # R-5 G-15
+from seosoyoung.plugin_sdk.slack import UserInfo  # R-5 G-15
 
 from seosoyoung_plugins.trello.client import TrelloClient
 from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
@@ -246,6 +248,12 @@ class TrelloPlugin(Plugin):
         # 8. Get session_id for this thread
         session_id = soulstream.get_session_id(item_ts)
 
+        # 8b. R-5 G-15: 슬랙 reaction 사용자 신원 조회 (R-2 G-9 fix §9 대칭).
+        # plugin_sdk.slack.get_user_info가 SlackBackendImpl.get_user_info로 위임 —
+        # users.info API 호출 후 image_192/email 포함한 UserInfo 반환.
+        # None graceful (T-G15-J): 신원 키 부재로 caller_info 박혀 호출 진행.
+        user_info = await slack.get_user_info(user_id) if user_id else None
+
         # 9. Run compact + Claude in background thread
         def run_async_task():
             """Run async operations in new event loop."""
@@ -260,6 +268,8 @@ class TrelloPlugin(Plugin):
                     session_id,
                     prompt,
                     context=context_items,
+                    user_id=user_id,        # R-5 G-15
+                    user_info=user_info,    # R-5 G-15 (클로저 capture)
                 ))
             finally:
                 loop.close()
@@ -277,8 +287,16 @@ class TrelloPlugin(Plugin):
         session_id: str | None,
         prompt: str,
         context: list[dict] | None = None,
+        *,
+        user_id: str = "",  # R-5 G-15: reaction 단 사용자 ID (event.user)
+        user_info: UserInfo | None = None,  # R-5 G-15: slack.get_user_info 결과 forward
     ):
-        """Execute Claude with compact in async context."""
+        """Execute Claude with compact in async context.
+
+        R-5 G-15 (2026-05-11): `user_id`/`user_info` keyword-only 인자 추가.
+        `_on_reaction`이 async context에서 await slack.get_user_info(user_id)로 조회한
+        UserInfo를 클로저 capture하여 forward. `build_slack_caller_info` 6-arg 호출에 사용.
+        """
         lock = _get_session_lock(thread_ts)
         if not lock.acquire(blocking=False):
             try:
@@ -314,7 +332,21 @@ class TrelloPlugin(Plugin):
                     logger.error("Session compact error: %s", e)
 
             # Run Claude
-            # 사용자가 슬랙 리액션으로 트리거한 직접 실행 경로이므로 source는 "slack"
+            # R-5 G-15 (2026-05-11): 사용자가 슬랙 리액션으로 트리거한 직접 실행 경로 —
+            # R-2 G-9 fix(handlers/mention.py 6-arg) 패턴을 §9 대칭으로 적용.
+            # build_slack_caller_info는 plugin_sdk.caller_info가 host slackbot 정본을
+            # re-export (옵션 A §3 정본 단일).
+            # user_info None graceful: 신원 키 부재로 caller_info 박혀 호출 진행 (T-G15-J).
+            caller_info = build_slack_caller_info(
+                channel_id=channel,
+                user_id=user_id,
+                thread_ts=thread_ts,
+                display_name=(
+                    (user_info.display_name or user_info.real_name) if user_info else None
+                ),
+                avatar_url=user_info.avatar_url if user_info else None,
+                email=user_info.email if user_info else None,
+            )
             result = await soulstream.run(
                 prompt=prompt,
                 channel=channel,
@@ -322,7 +354,7 @@ class TrelloPlugin(Plugin):
                 session_id=session_id,
                 role="admin",
                 context=context,
-                caller_info={"source": "slack"},
+                caller_info=caller_info,
             )
 
             if not result.ok:

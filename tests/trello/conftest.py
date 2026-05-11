@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from seosoyoung.plugin_sdk import slack as slack_module, soulstream as soulstream_module
+from seosoyoung.plugin_sdk.slack import UserInfo
 
 
 @pytest.fixture(autouse=True)
@@ -14,6 +15,11 @@ def mock_plugin_sdk():
     mock_slack_backend.add_reaction = AsyncMock(return_value=MagicMock(ok=True))
     mock_slack_backend.remove_reaction = AsyncMock(return_value=MagicMock(ok=True))
     mock_slack_backend.open_dm = AsyncMock(return_value="D123")
+    # R-5 G-15: trello reaction trigger가 plugin_sdk.slack.get_user_info를 await — AsyncMock 필요
+    mock_slack_backend.get_user_info = AsyncMock(return_value=UserInfo(
+        id="U123", name="user", display_name="Test User",
+        avatar_url="https://x.com/test.png", email="test@example.com",
+    ))
 
     mock_soulstream_backend = MagicMock()
     mock_soulstream_backend.run = AsyncMock(return_value=MagicMock(ok=True, session_id="session-123"))
