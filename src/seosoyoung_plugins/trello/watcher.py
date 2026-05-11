@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from seosoyoung.plugin_sdk import slack, soulstream
+from seosoyoung.plugin_sdk.caller_info import (
+    build_bot_caller_info,
+    get_host_preferred_node,
+)
 from seosoyoung_plugins.trello.client import TrelloClient, TrelloCard
 from seosoyoung_plugins.trello.prompt_builder import PromptBuilder
 
@@ -716,13 +720,14 @@ class TrelloWatcher:
                         dm_thread_ts=dm_thread_ts,
                         trello_card=tracked,
                         context=context,
-                        # G-5 R-3 fix(2026-05-11): v1 스키마 정합 (build_bot_caller_info 패턴 복제).
-                        caller_info={
-                            "source": "trello_watcher",
-                            "display_name": "트렐로 워처",
-                            "user_id": None,
-                            "avatar_url": "/api/system/portraits/trello_watcher",
-                        },
+                        # R-4 fix(2026-05-11, atom G-12 + G-14): plugin_sdk helper로 정본 통합.
+                        # build_bot_caller_info — display_name + server-relative avatar_url (R-3 G-5 정합).
+                        # get_host_preferred_node — host config 동적 조회 → caller_info.agent_node (다중 노드 audit).
+                        caller_info=build_bot_caller_info(
+                            source="trello_watcher",
+                            display_name="트렐로 워처",
+                            agent_node=get_host_preferred_node(),
+                        ),
                     )
                 )
 
