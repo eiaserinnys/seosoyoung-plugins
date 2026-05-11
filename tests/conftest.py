@@ -1,11 +1,25 @@
 """Common fixtures for seosoyoung-plugins tests."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import os
+import sys
 
-import pytest
+# R-4 fix(2026-05-11, atom G-12): worktree 환경에서 plugin_sdk·soul_common path override.
+# pyproject.toml `pythonpath`는 main 정합 보존(`../seosoyoung/src`, `../soulstream/packages/soul-common/src`)
+# — worktree test 시 환경변수로 R-4 plugin_sdk/caller_info.py 등 신규 모듈에 접근.
+# main 머지 후에는 환경변수 부재로 본 분기 skip (원본 path 사용, 정합).
+for env_var, sys_path_prepend in (
+    ("R4_SEOSOYOUNG_SRC", os.environ.get("R4_SEOSOYOUNG_SRC")),
+    ("R4_SOUL_COMMON_SRC", os.environ.get("R4_SOUL_COMMON_SRC")),
+):
+    if sys_path_prepend:
+        sys.path.insert(0, sys_path_prepend)
 
-from seosoyoung.plugin_sdk.slack import SendMessageResult, ReactionResult
-from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
+
+import pytest  # noqa: E402
+
+from seosoyoung.plugin_sdk.slack import SendMessageResult, ReactionResult  # noqa: E402
+from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus  # noqa: E402
 
 
 @pytest.fixture

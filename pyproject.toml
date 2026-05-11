@@ -68,7 +68,14 @@ packages = ["src/seosoyoung_plugins"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = ["src", "../seosoyoung/src"]
+# R-4 (atom G-12, 2026-05-11): soul-common src를 *test-only* pythonpath에 추가하여
+# cross-import 회귀(test_caller_info_signature_regression.py)에서 정본 시그니처 비교.
+# plugin prod 코드는 plugin_sdk만 import — 본 path 추가는 test 영향만 (prod 의존성 0).
+pythonpath = [
+    "src",
+    "../seosoyoung/src",
+    "../soulstream/packages/soul-common/src",
+]
 
 [tool.coverage.run]
 source = ["src/seosoyoung_plugins"]

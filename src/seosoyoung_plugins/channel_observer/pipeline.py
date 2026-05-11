@@ -18,6 +18,10 @@ from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from seosoyoung.plugin_sdk import mention, slack, soulstream
+from seosoyoung.plugin_sdk.caller_info import (
+    build_bot_caller_info,
+    get_host_preferred_node,
+)
 from seosoyoung.plugin_sdk.slack import Message
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
@@ -944,15 +948,16 @@ async def _execute_intervene(
             model=intervene_model,
             folder_id=folder_id,
             agent_id=agent_id,
-            # G-5 R-3 fix(2026-05-11): v1 caller_info 스키마 정합 (soul_common.auth.caller_info.build_bot_caller_info 정본).
-            # display_name + server-relative avatar_url을 빌더가 박으면 R-2 enrichment NOOP 자연 충족 →
-            # unified-dashboard D1/D5에 봇 정체성 표시. soul_common 의존성은 plugin_sdk에 없으므로 dict 복제.
-            caller_info={
-                "source": "channel_observer",
-                "display_name": "채널 관찰자",
-                "user_id": None,
-                "avatar_url": "/api/system/portraits/channel_observer",
-            },
+            # R-4 fix(2026-05-11, atom G-12 + G-14): plugin_sdk helper로 정본 통합.
+            # build_bot_caller_info — display_name + server-relative avatar_url 박음 (R-3 G-5 정합).
+            # get_host_preferred_node — host config Config.orchestrator.preferred_node 동적 조회 → caller_info.agent_node.
+            # truthy면 채움(다중 노드 audit 가시성), None이면 키 부재(자동 라우팅 graceful).
+            # 정본: seosoyoung/plugin_sdk/caller_info.py (cross-import 회귀로 soul_common 정본과 시그니처 정합).
+            caller_info=build_bot_caller_info(
+                source="channel_observer",
+                display_name="채널 관찰자",
+                agent_node=get_host_preferred_node(),
+            ),
         )
         if result.ok:
             response_text = result.output
