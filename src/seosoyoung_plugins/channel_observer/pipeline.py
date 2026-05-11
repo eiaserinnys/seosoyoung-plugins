@@ -944,7 +944,15 @@ async def _execute_intervene(
             model=intervene_model,
             folder_id=folder_id,
             agent_id=agent_id,
-            caller_info={"source": "channel_observer"},
+            # G-5 R-3 fix(2026-05-11): v1 caller_info 스키마 정합 (soul_common.auth.caller_info.build_bot_caller_info 정본).
+            # display_name + server-relative avatar_url을 빌더가 박으면 R-2 enrichment NOOP 자연 충족 →
+            # unified-dashboard D1/D5에 봇 정체성 표시. soul_common 의존성은 plugin_sdk에 없으므로 dict 복제.
+            caller_info={
+                "source": "channel_observer",
+                "display_name": "채널 관찰자",
+                "user_id": None,
+                "avatar_url": "/api/system/portraits/channel_observer",
+            },
         )
         if result.ok:
             response_text = result.output
