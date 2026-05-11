@@ -716,7 +716,13 @@ class TrelloWatcher:
                         dm_thread_ts=dm_thread_ts,
                         trello_card=tracked,
                         context=context,
-                        caller_info={"source": "trello_watcher"},
+                        # G-5 R-3 fix(2026-05-11): v1 스키마 정합 (build_bot_caller_info 패턴 복제).
+                        caller_info={
+                            "source": "trello_watcher",
+                            "display_name": "트렐로 워처",
+                            "user_id": None,
+                            "avatar_url": "/api/system/portraits/trello_watcher",
+                        },
                     )
                 )
 
