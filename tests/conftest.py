@@ -12,6 +12,12 @@ for env_var, sys_path_prepend in (
     ("R4_SOUL_COMMON_SRC", os.environ.get("R4_SOUL_COMMON_SRC")),
 ):
     if sys_path_prepend:
+        # 명시적 실패 (§4): env가 stale path를 가리키면 worktree 정리 후 silent fallback이
+        # 잡히지 않도록 즉시 RuntimeError. code-reviewer 권고 (a4ae69df).
+        if not os.path.isdir(sys_path_prepend):
+            raise RuntimeError(
+                f"{env_var}={sys_path_prepend} not a directory — stale worktree env?"
+            )
         sys.path.insert(0, sys_path_prepend)
 
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
