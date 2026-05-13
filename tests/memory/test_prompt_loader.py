@@ -64,8 +64,6 @@ class TestAllPromptFilesExist:
         # 채널 관찰 프롬프트
         "channel_observer_system.txt",
         "channel_observer_user.txt",
-        "channel_intervene_system.txt",
-        "channel_intervene_user.txt",
         "digest_compressor_system.txt",
         "digest_compressor_retry.txt",
         # OM 프롬프트
@@ -105,13 +103,6 @@ class TestChannelPromptsFromFiles:
         assert "laughing" in prompt
         assert "fire" in prompt
 
-    def test_channel_intervene_system_prompt(self):
-        """채널 개입 응답 시스템 프롬프트가 정상 로드"""
-        from seosoyoung_plugins.channel_observer.prompts import get_channel_intervene_system_prompt
-
-        prompt = get_channel_intervene_system_prompt()
-        assert "서소영" in prompt
-        assert "개입" in prompt or "응답" in prompt or "대화" in prompt
 
 class TestOMPromptsFromFiles:
     """외부 파일 기반 OM prompts 빌더 테스트"""
