@@ -31,3 +31,23 @@ class TestExtractUtterances:
     def test_whitespace_only_utterance(self):
         text = "<utterance>   \n  \n   </utterance>"
         assert _extract_utterances(text) == ""
+
+    def test_dedupe_same_utterance(self):
+        """누적 텍스트에 같은 utterance가 두 번 등장하면 한 번만 게시한다."""
+        text = "<utterance>안녕</utterance>\n중간 분석\n<utterance>안녕</utterance>"
+        assert _extract_utterances(text) == "안녕"
+
+    def test_dedupe_preserves_order(self):
+        """dedupe 후에도 등장 순서를 보존한다."""
+        text = (
+            "<utterance>A</utterance>\n"
+            "<utterance>B</utterance>\n"
+            "<utterance>A</utterance>\n"
+            "<utterance>C</utterance>"
+        )
+        assert _extract_utterances(text) == "A\nB\nC"
+
+    def test_dedupe_ignores_whitespace_differences(self):
+        """strip 후 동일한 본문은 dedupe한다 (양옆 공백 차이 무시)."""
+        text = "<utterance>  안녕  </utterance>\n<utterance>안녕</utterance>"
+        assert _extract_utterances(text) == "안녕"

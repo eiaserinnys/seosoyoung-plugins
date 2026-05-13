@@ -61,3 +61,27 @@ def mock_plugin_sdk():
 
     for p in reversed(patches):
         p.stop()
+
+
+@pytest.fixture(autouse=True)
+def patch_host_preferred_node():
+    """`get_host_preferred_node`는 host Config singleton을 import하여
+    `OPERATOR_USER_ID` 등 슬랙봇 env를 검증한다. unit test 환경에는 그 env들이
+    없어 KeyError가 발생, _execute_intervene을 직접 호출하는 테스트가 모두
+    `intervene 응답 생성 실패: 'OPERATOR_USER_ID'`로 실패한다.
+
+    caller_info.py docstring은 *test 환경에서 graceful None* 으로 degrade하도록
+    명세하지만 KeyError 케이스를 잡지 않는다 — 본 fixture가 테스트 측 보호.
+    (정본 패치는 caller_info.get_host_preferred_node의 except에 KeyError 추가가
+    적절하나 본 카드 범위 외 — 별도 카드로 분리 권고.)
+    """
+    try:
+        p = patch(
+            "seosoyoung_plugins.channel_observer.pipeline.get_host_preferred_node",
+            return_value=None,
+        )
+        p.start()
+        yield
+        p.stop()
+    except (AttributeError, ModuleNotFoundError):
+        yield
