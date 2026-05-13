@@ -811,13 +811,25 @@ async def _handle_single_judge(
 def _extract_utterances(text: str) -> str | None:
     """<utterance> 태그 내용을 모두 추출하여 연결합니다.
 
+    누적 텍스트(thinking + 중간 text_delta + final output)에 같은 utterance가
+    여러 번 등장해도 한 번만 게시하기 위해 strip 후 동일한 본문은 dedupe합니다.
+    등장 순서는 보존하며, 첫 등장만 결과에 포함됩니다.
+
     태그가 없으면 None을 반환합니다.
-    태그가 있지만 내용이 비어있으면 빈 문자열을 반환합니다.
+    태그가 있지만 내용이 모두 공백/빈 문자열이면 빈 문자열을 반환합니다.
     """
     matches = re.findall(r"<utterance>(.*?)</utterance>", text, re.DOTALL)
     if not matches:
         return None
-    return "\n".join(m.strip() for m in matches)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for m in matches:
+        s = m.strip()
+        if s in seen:
+            continue
+        seen.add(s)
+        unique.append(s)
+    return "\n".join(unique)
 
 
 def _make_resolver() -> DisplayNameResolver | None:
@@ -959,24 +971,38 @@ async def _execute_intervene(
                 agent_node=get_host_preferred_node(),
             ),
         )
-        if result.ok:
-            response_text = result.output
-            # <utterance> 태그에서 실제 발화만 추출 (태그 없으면 전체 텍스트 fallback)
-            utterance = _extract_utterances(response_text)
-            if utterance is not None:
-                response_text = utterance
-        else:
+        if not result.ok:
             logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")
             await _remove_thinking_reaction(channel_id, reaction_ts)
             return
+
+        # 게시 정책 (사용자 결정 2026-05-13):
+        #   - 누적 텍스트(thinking + 중간 text_delta + final output) 어디든
+        #     <utterance>...</utterance> 매칭이 있으면 그 발화만 채널에 게시한다.
+        #   - 어디에도 매칭이 없으면 게시하지 않는다 — sub-agent 작업 보고나
+        #     분석/메모가 채널에 누출되지 않도록 차단.
+        #
+        # backend 호환: RunResult.transcript는 새로 추가된 필드이므로 옛 backend는
+        # 보유하지 않을 수 있다 — getattr fallback으로 graceful degrade.
+        source_text = getattr(result, "transcript", "") or result.output or ""
+        utterance = _extract_utterances(source_text)
+        if utterance is None:
+            logger.warning(
+                f"intervene 게시 skip — <utterance> 태그 없음 ({channel_id}): "
+                f"transcript_len={len(source_text)}"
+            )
+            await _remove_thinking_reaction(channel_id, reaction_ts)
+            return
+        response_text = utterance
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")
-        _remove_thinking_reaction(channel_id, reaction_ts)
+        await _remove_thinking_reaction(channel_id, reaction_ts)
         return
 
-    if not response_text or not response_text.strip():
-        logger.warning(f"intervene 빈 응답 ({channel_id})")
-        _remove_thinking_reaction(channel_id, reaction_ts)
+    if not response_text.strip():
+        # 빈 utterance 케이스 (<utterance></utterance>) — dedupe 후 빈 문자열
+        logger.warning(f"intervene 빈 utterance ({channel_id})")
+        await _remove_thinking_reaction(channel_id, reaction_ts)
         return
 
     # 5. 슬랙 발송 + 봇 응답 ts를 judged에 기록
