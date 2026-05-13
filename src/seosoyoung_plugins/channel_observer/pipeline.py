@@ -42,7 +42,6 @@ from seosoyoung_plugins.channel_observer.observer import (
 )
 from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
-    get_channel_intervene_system_prompt,
 )
 from seosoyoung_plugins.channel_observer.store import ChannelStore
 from seosoyoung_plugins.memory.token_counter import TokenCounter
@@ -906,8 +905,10 @@ async def _execute_intervene(
         trigger_message = all_context[-1]
         recent_messages = all_context[-(recent_messages_count + 1):-1]
 
-    # 3. 프롬프트 / 컨텍스트 구성
-    system_prompt = get_channel_intervene_system_prompt()
+    # 3. 컨텍스트 구성
+    # system_prompt는 더 이상 주입하지 않는다 — 폴더 프롬프트(7fff70ac-...) +
+    # channel-intervene SKILL.md가 정본. 코드 측 주입은 Agent SDK 기본 preset
+    # (available-skills, CLAUDE.md, 폴더 프롬프트)을 덮어버리는 결함이었음.
 
     # 스레드 대상이면 해당 ts, 채널 대상이면 트리거 메시지 ts를 세션 키로 사용
     run_thread_ts = (
@@ -944,7 +945,6 @@ async def _execute_intervene(
             thread_ts=run_thread_ts,
             text_only=True,
             context=context_items,
-            system_prompt=system_prompt,  # context_item 대신 실제 API system 파라미터로 전달
             model=intervene_model,
             folder_id=folder_id,
             agent_id=agent_id,

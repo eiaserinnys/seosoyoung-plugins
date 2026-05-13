@@ -147,10 +147,6 @@ class TestExecuteInterveneRecentMessagesSlicing:
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
-                return_value="sys",
-            ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
@@ -186,10 +182,6 @@ class TestExecuteInterveneRecentMessagesSlicing:
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
-                return_value="sys",
-            ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
@@ -229,10 +221,6 @@ class TestExecuteInterveneRecentMessagesSlicing:
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
-                return_value="sys",
-            ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
@@ -266,10 +254,6 @@ class TestExecuteInterveneRecentMessagesSlicing:
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
-                return_value="sys",
-            ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))
@@ -290,6 +274,9 @@ class TestExecuteInterveneRecentMessagesSlicing:
             assert call_kwargs["prompt"] == "(채널 개입 트리거)"
             context = call_kwargs["context"]
             assert not any(item["key"] == "recent_messages" for item in context)
+            # 회귀 보호 — 채널 개입은 더 이상 system_prompt 인자를 주입하지 않는다.
+            # 폴더 프롬프트(7fff70ac-...) + channel-intervene SKILL.md가 정본.
+            assert "system_prompt" not in call_kwargs
 
     @pytest.mark.asyncio
     async def test_default_count_is_5(self):
@@ -303,10 +290,6 @@ class TestExecuteInterveneRecentMessagesSlicing:
         with (
             patch("seosoyoung_plugins.channel_observer.pipeline.soulstream") as mock_soul,
             patch("seosoyoung_plugins.channel_observer.pipeline.slack") as mock_slack,
-            patch(
-                "seosoyoung_plugins.channel_observer.pipeline.get_channel_intervene_system_prompt",
-                return_value="sys",
-            ),
         ):
             mock_slack.add_reaction = AsyncMock()
             mock_soul.run = AsyncMock(return_value=MagicMock(ok=False))

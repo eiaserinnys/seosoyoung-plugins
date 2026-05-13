@@ -120,11 +120,6 @@ def build_digest_compressor_retry_prompt(
     )
 
 
-def get_channel_intervene_system_prompt() -> str:
-    """채널 개입 응답 생성 시스템 프롬프트를 반환합니다."""
-    return _load("channel_intervene_system.txt")
-
-
 def build_digest_only_system_prompt() -> str:
     """소화 전용 시스템 프롬프트를 반환합니다."""
     return _load("digest_only_system.txt")
