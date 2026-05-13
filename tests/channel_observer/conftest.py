@@ -71,9 +71,10 @@ def patch_host_preferred_node():
     `intervene 응답 생성 실패: 'OPERATOR_USER_ID'`로 실패한다.
 
     caller_info.py docstring은 *test 환경에서 graceful None* 으로 degrade하도록
-    명세하지만 KeyError 케이스를 잡지 않는다 — 본 fixture가 테스트 측 보호.
-    (정본 패치는 caller_info.get_host_preferred_node의 except에 KeyError 추가가
-    적절하나 본 카드 범위 외 — 별도 카드로 분리 권고.)
+    명세하며, 본 카드의 정본 패치(seosoyoung 측 caller_info.py)에서 `except`에
+    KeyError를 추가하여 동일 환경에서 자연스럽게 None으로 떨어지도록 보강했다.
+    본 fixture는 그 정본 패치의 *이중 안전망* — 정본 patch가 미반영된 환경(옛
+    seosoyoung backend)에서도 unit test가 정상 동작하도록 보호한다.
     """
     try:
         p = patch(
