@@ -873,6 +873,7 @@ class TestBotResponseRecordedInJudged:
         # soulstream mock 응답 설정
         mock_plugin_sdk["soulstream"].run.return_value = RunResult(
             ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+            utterances=["개입 메시지입니다."],
         )
 
         # 특정 ts 반환하도록 설정
@@ -920,6 +921,7 @@ class TestInterventionSessionCreation:
         # soulstream mock 응답 설정
         mock_plugin_sdk["soulstream"].run.return_value = RunResult(
             ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+            utterances=["개입 메시지입니다."],
         )
 
         # 특정 ts 반환하도록 설정
@@ -968,6 +970,7 @@ class TestInterventionSessionCreation:
         # soulstream mock 응답 설정
         mock_plugin_sdk["soulstream"].run.return_value = RunResult(
             ok=True, status=RunStatus.COMPLETED, output="개입 메시지입니다.",
+            utterances=["개입 메시지입니다."],
         )
 
         # 특정 ts 반환하도록 설정

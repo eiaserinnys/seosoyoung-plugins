@@ -808,28 +808,27 @@ async def _handle_single_judge(
         )
 
 
-def _extract_utterances(text: str) -> str | None:
-    """<utterance> 태그 내용을 모두 추출하여 연결합니다.
+def _dedupe_utterances(raw_matches: list[str]) -> list[str]:
+    """블록별 ``<utterance>`` 매치 list를 strip 동일성으로 dedupe합니다.
 
-    누적 텍스트(thinking + 중간 text_delta + final output)에 같은 utterance가
-    여러 번 등장해도 한 번만 게시하기 위해 strip 후 동일한 본문은 dedupe합니다.
-    등장 순서는 보존하며, 첫 등장만 결과에 포함됩니다.
+    backend가 thinking 블록 / text_start~text_end 트리오 / complete 블록 각각에서
+    추출하여 list로 누적한 매치 결과를 받아, 본 함수가 *호출자 측 정책*을 적용한다:
 
-    태그가 없으면 None을 반환합니다.
-    태그가 있지만 내용이 모두 공백/빈 문자열이면 빈 문자열을 반환합니다.
+    - ``strip()`` 후 빈 문자열은 제외 (빈 ``<utterance></utterance>`` 케이스).
+    - 같은 본문이 여러 블록에서 매치돼도(예: text 블록과 complete 블록 둘 다에서)
+      등장 순서를 보존하며 *첫 등장만* 보존한다.
+
+    backend는 dedupe·필터 책임을 지지 않는다 — 정책이 호출자마다 다를 수 있다 (책임 분리).
     """
-    matches = re.findall(r"<utterance>(.*?)</utterance>", text, re.DOTALL)
-    if not matches:
-        return None
     seen: set[str] = set()
     unique: list[str] = []
-    for m in matches:
-        s = m.strip()
-        if s in seen:
+    for m in raw_matches:
+        s = (m or "").strip()
+        if not s or s in seen:
             continue
         seen.add(s)
         unique.append(s)
-    return "\n".join(unique)
+    return unique
 
 
 def _make_resolver() -> DisplayNameResolver | None:
@@ -976,32 +975,31 @@ async def _execute_intervene(
             await _remove_thinking_reaction(channel_id, reaction_ts)
             return
 
-        # 게시 정책 (사용자 결정 2026-05-13):
-        #   - 누적 텍스트(thinking + 중간 text_delta + final output) 어디든
-        #     <utterance>...</utterance> 매칭이 있으면 그 발화만 채널에 게시한다.
-        #   - 어디에도 매칭이 없으면 게시하지 않는다 — sub-agent 작업 보고나
-        #     분석/메모가 채널에 누출되지 않도록 차단.
+        # 게시 정책 (사용자 결정 2026-05-18, 사이클 260518.01):
+        #   - backend가 thinking / text_start~text_end / complete 각 *블록의 텍스트만*에서
+        #     ``<utterance>(.*?)</utterance>`` 매치를 추출하여 ``RunResult.utterances`` list로
+        #     반환한다 (책임: 블록 단위 추출).
+        #   - 본 호출자는 그 list에 strip 동일성 dedupe를 적용한 뒤(중복 차단),
+        #     남은 본문들을 줄바꿈으로 합쳐 채널에 게시한다.
+        #   - 매치 list가 비어 있거나 strip 후 모두 공백이면 게시하지 않는다 —
+        #     sub-agent 작업 보고나 분석/메모가 채널에 누출되지 않도록 차단.
         #
-        # backend 호환: RunResult.transcript는 새로 추가된 필드이므로 옛 backend는
-        # 보유하지 않을 수 있다 — getattr fallback으로 graceful degrade.
-        source_text = getattr(result, "transcript", "") or result.output or ""
-        utterance = _extract_utterances(source_text)
-        if utterance is None:
+        # *직전 사이클*(260513.01)이 사용한 ``transcript`` 누적 검색 정책은 폐기.
+        # 누적 transcript에 thinking 묶음의 우발 ``<utterance>`` 토큰이 text 묶음의
+        # 정상 ``</utterance>``와 인접하여 한 덩이 매치로 분석 텍스트 전체를 흘리는
+        # 사고(채널 C08KT1HDU5U, ts 1779069595.658659, 2026-05-18)가 본 회귀의 계기.
+        raw_matches = list(getattr(result, "utterances", None) or [])
+        unique = _dedupe_utterances(raw_matches)
+        if not unique:
             logger.warning(
-                f"intervene 게시 skip — <utterance> 태그 없음 ({channel_id}): "
-                f"transcript_len={len(source_text)}"
+                f"intervene 게시 skip — <utterance> 매치 없음 ({channel_id}): "
+                f"raw_matches={len(raw_matches)}"
             )
             await _remove_thinking_reaction(channel_id, reaction_ts)
             return
-        response_text = utterance
+        response_text = "\n".join(unique)
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")
-        await _remove_thinking_reaction(channel_id, reaction_ts)
-        return
-
-    if not response_text.strip():
-        # 빈 utterance 케이스 (<utterance></utterance>) — dedupe 후 빈 문자열
-        logger.warning(f"intervene 빈 utterance ({channel_id})")
         await _remove_thinking_reaction(channel_id, reaction_ts)
         return
 
