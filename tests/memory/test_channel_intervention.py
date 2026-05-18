@@ -664,6 +664,7 @@ class TestRunChannelPipeline:
         mock_plugin_sdk["soulstream"].run.return_value = RunResult(
             ok=True, status=RunStatus.COMPLETED,
             output="이런 일이 벌어지다니, 놀랍구려.",
+            utterances=["이런 일이 벌어지다니, 놀랍구려."],
         )
 
         async def mock_llm_call(system_prompt, user_prompt):
@@ -803,6 +804,7 @@ class TestRunChannelPipeline:
         mock_plugin_sdk["soulstream"].run.return_value = RunResult(
             ok=True, status=RunStatus.COMPLETED,
             output="중요한 응답입니다.",
+            utterances=["중요한 응답입니다."],
         )
 
         async def mock_llm_call(system_prompt, user_prompt):

@@ -37,12 +37,20 @@ def sample_config() -> dict:
     }
 
 
-def _make_default_soulstream_run_mock(output: str = "mock soulstream response"):
-    """soulstream.run()의 기본 mock을 생성합니다."""
+def _make_default_soulstream_run_mock(
+    output: str = "mock soulstream response",
+    utterances: list[str] | None = None,
+):
+    """soulstream.run()의 기본 mock을 생성합니다.
+
+    채널 개입 게이트(사이클 260518.01) 통과를 위해 기본 utterances 1건을 채운다.
+    호출자가 별도 utterances를 주면 그대로 사용한다.
+    """
     return AsyncMock(return_value=RunResult(
         ok=True,
         status=RunStatus.COMPLETED,
         output=output,
+        utterances=["mock 발화"] if utterances is None else utterances,
     ))
 
 

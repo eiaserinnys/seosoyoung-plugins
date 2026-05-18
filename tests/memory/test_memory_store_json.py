@@ -583,6 +583,7 @@ class TestMigrationCli:
 
     def test_cli_dry_run(self, tmp_path):
         import subprocess
+        import sys
 
         obs_dir = tmp_path / "observations"
         obs_dir.mkdir()
@@ -591,8 +592,10 @@ class TestMigrationCli:
         )
 
         script = Path(__file__).resolve().parent.parent.parent / "scripts" / "migrate_om_to_json.py"
+        # sys.executable로 현재 테스트 러너와 동일한 인터프리터 사용 — ``python``
+        # 하드코딩 시 Python 3.11이 잡혀 user-local 3.10의 tiktoken을 못 찾는 회귀.
         result = subprocess.run(
-            ["python", str(script), "--base-dir", str(tmp_path), "--dry-run"],
+            [sys.executable, str(script), "--base-dir", str(tmp_path), "--dry-run"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -606,6 +609,7 @@ class TestMigrationCli:
 
     def test_cli_actual_migration(self, tmp_path):
         import subprocess
+        import sys
 
         obs_dir = tmp_path / "observations"
         obs_dir.mkdir()
@@ -615,7 +619,7 @@ class TestMigrationCli:
 
         script = Path(__file__).resolve().parent.parent.parent / "scripts" / "migrate_om_to_json.py"
         result = subprocess.run(
-            ["python", str(script), "--base-dir", str(tmp_path)],
+            [sys.executable, str(script), "--base-dir", str(tmp_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -627,10 +631,11 @@ class TestMigrationCli:
 
     def test_cli_nonexistent_dir(self):
         import subprocess
+        import sys
 
         script = Path(__file__).resolve().parent.parent.parent / "scripts" / "migrate_om_to_json.py"
         result = subprocess.run(
-            ["python", str(script), "--base-dir", "/nonexistent/path"],
+            [sys.executable, str(script), "--base-dir", "/nonexistent/path"],
             capture_output=True,
             text=True,
             encoding="utf-8",
