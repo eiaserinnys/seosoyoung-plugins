@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from seosoyoung_plugins.channel_observer.intervention import InterventionHistory
 from seosoyoung_plugins.channel_observer.observer import ChannelObserver, DigestCompressor
+from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.channel_observer.store import ChannelStore
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ class ChannelDigestScheduler:
         intervene_model: str | None = None,
         folder_id: str | None = None,
         agent_id: str | None = None,
+        remiel_config: RemielContextConfig | None = None,
         **kwargs,
     ):
         self.store = store
@@ -65,6 +67,7 @@ class ChannelDigestScheduler:
         self.intervene_model = intervene_model
         self.folder_id = folder_id
         self.agent_id = agent_id
+        self.remiel_config = remiel_config
 
         self._timer: threading.Timer | None = None
         self._running = False
@@ -137,28 +140,34 @@ class ChannelDigestScheduler:
             return
 
         try:
-            asyncio.run(
-                run_channel_pipeline(
-                    store=self.store,
-                    observer=self.observer,
-                    channel_id=channel_id,
-                    cooldown=self.cooldown,
-                    threshold_a=1,  # 주기적 트리거는 pending이 있으면 무조건 실행
-                    threshold_b=self.buffer_threshold,
-                    compressor=self.compressor,
-                    digest_max_tokens=self.digest_max_tokens,
-                    digest_target_tokens=self.digest_target_tokens,
-                    debug_channel=self.debug_channel,
-                    intervention_threshold=self.intervention_threshold,
-                    react_probability=self.react_probability,
-                    llm_call=self.llm_call,
-                    bot_user_id=self.bot_user_id,
-                    recent_messages_count=self.recent_messages_count,
-                    intervene_model=self.intervene_model,
-                    folder_id=self.folder_id,
-                    agent_id=self.agent_id,
-                )
+            pipeline_coro = run_channel_pipeline(
+                store=self.store,
+                observer=self.observer,
+                channel_id=channel_id,
+                cooldown=self.cooldown,
+                threshold_a=1,  # 주기적 트리거는 pending이 있으면 무조건 실행
+                threshold_b=self.buffer_threshold,
+                compressor=self.compressor,
+                digest_max_tokens=self.digest_max_tokens,
+                digest_target_tokens=self.digest_target_tokens,
+                debug_channel=self.debug_channel,
+                intervention_threshold=self.intervention_threshold,
+                react_probability=self.react_probability,
+                llm_call=self.llm_call,
+                bot_user_id=self.bot_user_id,
+                recent_messages_count=self.recent_messages_count,
+                intervene_model=self.intervene_model,
+                folder_id=self.folder_id,
+                agent_id=self.agent_id,
+                remiel_config=self.remiel_config,
             )
+            try:
+                asyncio.run(pipeline_coro)
+            finally:
+                # Tests may mock asyncio.run; close the coroutine if the mock
+                # did not consume it.
+                if getattr(pipeline_coro, "cr_frame", None) is not None:
+                    pipeline_coro.close()
         except Exception as e:
             logger.error(f"주기적 파이프라인 실행 실패 ({channel_id}): {e}")
         finally:
