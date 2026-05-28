@@ -43,6 +43,10 @@ from seosoyoung_plugins.channel_observer.observer import (
 from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
 )
+from seosoyoung_plugins.channel_observer.remiel_context import (
+    RemielContextConfig,
+    build_remiel_context_item,
+)
 from seosoyoung_plugins.channel_observer.store import ChannelStore
 from seosoyoung_plugins.memory.token_counter import TokenCounter
 
@@ -301,6 +305,7 @@ async def run_channel_pipeline(
     intervene_model: str | None = None,
     folder_id: str | None = None,
     agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -502,6 +507,7 @@ async def run_channel_pipeline(
                 intervene_model=intervene_model,
                 folder_id=folder_id,
                 agent_id=agent_id,
+                remiel_config=remiel_config,
             )
         else:
             # 하위호환: 단일 판단 경로
@@ -526,6 +532,7 @@ async def run_channel_pipeline(
                 intervene_model=intervene_model,
                 folder_id=folder_id,
                 agent_id=agent_id,
+                remiel_config=remiel_config,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
@@ -551,6 +558,7 @@ async def _handle_multi_judge(
     intervene_model: str | None = None,
     folder_id: str | None = None,
     agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
     **kwargs,
 ) -> None:
     """복수 JudgeItem 처리: 이모지 일괄 + 개입 확률 판단"""
@@ -645,6 +653,7 @@ async def _handle_multi_judge(
                             intervene_model=intervene_model,
                             folder_id=folder_id,
                             agent_id=agent_id,
+                            remiel_config=remiel_config,
                         )
                     else:
                         await execute_interventions(channel_id, [action])
@@ -683,6 +692,7 @@ async def _handle_single_judge(
     intervene_model: str | None = None,
     folder_id: str | None = None,
     agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
     **kwargs,
 ) -> None:
     """하위호환: 단일 JudgeResult 처리"""
@@ -786,6 +796,7 @@ async def _handle_single_judge(
                             intervene_model=intervene_model,
                             folder_id=folder_id,
                             agent_id=agent_id,
+                            remiel_config=remiel_config,
                         )
                 else:
                     await execute_interventions(channel_id, message_actions)
@@ -855,6 +866,7 @@ async def _execute_intervene(
     intervene_model: str | None = None,
     folder_id: str | None = None,
     agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
     **kwargs,
 ) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
@@ -930,15 +942,17 @@ async def _execute_intervene(
 
     prompt = "(채널 개입 트리거)"
 
+    thread_context, remiel_timestamps = await _fetch_recent_context_bundle(
+        channel_id,
+        bot_user_id=bot_user_id,
+        resolver=_make_resolver(),
+    )
+
     context_items = [
         {
             "key": "thread_context",
             "label": "스레드 맥락",
-            "content": await _fetch_recent_context(
-                channel_id,
-                bot_user_id=bot_user_id,
-                resolver=_make_resolver(),
-            ),
+            "content": thread_context,
         },
         # NOTE: "관찰자 판단 근거" 섹션을 비활성화 — 자연스러운 대화 개입에 방해가 된다고 판단
         # {
@@ -947,6 +961,14 @@ async def _execute_intervene(
         #     "content": observer_reason or "",
         # },
     ]
+
+    remiel_context_item = await build_remiel_context_item(
+        remiel_config,
+        channel_id=channel_id,
+        timestamps=remiel_timestamps,
+    )
+    if remiel_context_item:
+        context_items.append(remiel_context_item)
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
     try:
@@ -1080,14 +1102,37 @@ async def _fetch_recent_context(
 
     API 호출 실패 시 빈 문자열을 반환합니다.
     """
+    context, _timestamps = await _fetch_recent_context_bundle(
+        channel_id,
+        count=count,
+        bot_user_id=bot_user_id,
+        resolver=resolver,
+    )
+    return context
+
+
+async def _fetch_recent_context_bundle(
+    channel_id: str,
+    count: int = 15,
+    bot_user_id: str | None = None,
+    resolver: DisplayNameResolver | None = None,
+) -> tuple[str, list[str]]:
+    """Fetch recent Slack context once and return formatted text plus ts list."""
     try:
         history = await slack.get_channel_history(channel_id, limit=count)
         # Slack API는 최신순 반환 → 시간순으로 뒤집기
         messages = list(reversed(history))  # list[Message] 그대로 전달 (rich 필드 보존)
-        return _format_recent_context(messages, bot_user_id=bot_user_id, resolver=resolver, channel_id=channel_id)
+        context = _format_recent_context(
+            messages,
+            bot_user_id=bot_user_id,
+            resolver=resolver,
+            channel_id=channel_id,
+        )
+        timestamps = [m.ts for m in messages if getattr(m, "ts", "")]
+        return context, timestamps
     except Exception as e:
         logger.debug(f"최근 메시지 조회 실패 ({channel_id}): {e}")
-        return ""
+        return "", []
 
 
 def _format_recent_context(

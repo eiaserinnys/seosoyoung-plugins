@@ -15,6 +15,7 @@ from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung_plugins.channel_observer import pipeline_lock
+from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class ChannelObserverPlugin(Plugin):
         self._intervene_agent_id: str | None = config.get("agent_id", None)
         self._trigger_words: list[str] = config.get("trigger_words", [])
         self._debug_channel: str = config.get("debug_channel", "")
+        self._remiel_config = RemielContextConfig.from_plugin_config(config)
 
         # Runtime components (initialized in on_startup)
         self._store = None
@@ -181,6 +183,7 @@ class ChannelObserverPlugin(Plugin):
                 intervene_model=self._intervene_model,
                 folder_id=self._intervene_folder_id,
                 agent_id=self._intervene_agent_id,
+                remiel_config=self._remiel_config,
             )
             self._scheduler.start()
 
@@ -230,7 +233,7 @@ class ChannelObserverPlugin(Plugin):
         try:
             collected = self._collector.collect(event)
             if collected:
-                self._send_collect_log(channel, event)
+                await self._send_collect_log(channel, event)
                 force = self._contains_trigger_word(
                     event.get("text", "")
                 )
@@ -354,6 +357,7 @@ class ChannelObserverPlugin(Plugin):
                             intervene_model=self._intervene_model,
                             folder_id=self._intervene_folder_id,
                             agent_id=self._intervene_agent_id,
+                            remiel_config=self._remiel_config,
                         )
                     )
                 finally:
@@ -368,7 +372,7 @@ class ChannelObserverPlugin(Plugin):
         digest_thread = threading.Thread(target=run, daemon=True)
         digest_thread.start()
 
-    def _send_collect_log(
+    async def _send_collect_log(
         self, channel_id: str, event: dict
     ) -> None:
         """수집 디버그 로그를 전송합니다."""
@@ -389,7 +393,7 @@ class ChannelObserverPlugin(Plugin):
                 if self._store
                 else 0
             )
-            send_collect_debug_log(
+            await send_collect_debug_log(
                 debug_channel=self._debug_channel,
                 source_channel=channel_id,
                 buffer_tokens=buffer_tokens,
