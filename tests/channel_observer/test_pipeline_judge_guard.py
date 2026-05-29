@@ -6,6 +6,8 @@ Bug 2: 멘션 필터링 후 judge_pending이 0건인데도 judge() 호출 (빈 L
 Bug 3: httpx.AsyncClient가 이벤트 루프 간 공유되어 Event loop is closed 에러
 """
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -178,69 +180,79 @@ class TestBug2_EmptyPendingSkipJudge:
 class TestBug3_AsyncClientEventLoop:
     """Bug 3: SoulstreamClient가 이벤트 루프 간 공유되어도 에러가 발생하지 않아야 한다."""
 
-    def test_ensure_client_recreates_when_closed(self):
-        """닫힌 클라이언트가 _ensure_client()로 재생성되는지 확인."""
+    def test_channel_observer_judge_reuses_soulstream_client_across_event_loops(self):
+        """같은 SoulstreamClient로 두 event loop에서 judge를 연속 실행해도 실패하지 않는다."""
         from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
-        client = SoulstreamClient(
-            base_url="http://localhost:4105",
-            bearer_token="test-token",
-        )
+        created_clients = []
 
-        original_client = client._client
-        # is_closed를 True로 패치하여 닫힌 상태 시뮬레이션
-        with patch.object(type(original_client), "is_closed", new_callable=lambda: property(lambda self: True)):
-            new_client = client._ensure_client()
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
 
-        assert new_client is not original_client
-        assert not new_client.is_closed
+            def json(self):
+                return {
+                    "content": (
+                        "<importance>1</importance>\n"
+                        '<reaction type="none" />\n'
+                        "<reasoning>ok</reasoning>"
+                    ),
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                    "session_id": "test-session",
+                }
 
-    def test_ensure_client_reuses_when_open(self):
-        """열려있는 클라이언트는 그대로 재사용."""
-        from seosoyoung_plugins.soulstream_client import SoulstreamClient
+        class LoopBoundAsyncClient:
+            """httpx.AsyncClient의 loop-bound transport 성질을 테스트에서 드러낸다."""
 
-        client = SoulstreamClient(
-            base_url="http://localhost:4105",
-            bearer_token="test-token",
-        )
+            def __init__(self, *args, **kwargs):
+                self.is_closed = False
+                self._bound_loop = None
+                created_clients.append(self)
 
-        original_client = client._client
-        reused = client._ensure_client()
-        assert reused is original_client
+            async def __aenter__(self):
+                return self
 
-    @pytest.mark.asyncio
-    async def test_complete_succeeds_after_client_closed(self):
-        """클라이언트가 닫힌 후에도 complete()가 새 클라이언트로 동작해야 한다."""
-        from seosoyoung_plugins.soulstream_client import SoulstreamClient
+            async def __aexit__(self, *exc):
+                await self.aclose()
 
-        client = SoulstreamClient(
-            base_url="http://localhost:4105",
-            bearer_token="test-token",
-        )
+            async def aclose(self):
+                self.is_closed = True
 
-        # 내부 클라이언트를 닫아 "Event loop is closed" 상황 시뮬레이션
-        await client._client.aclose()
-        assert client._client.is_closed
+            async def post(self, path, json):
+                current_loop = asyncio.get_running_loop()
+                if self._bound_loop is None:
+                    self._bound_loop = current_loop
+                elif self._bound_loop is not current_loop:
+                    raise RuntimeError("Event loop is closed")
+                assert path == "/llm/completions"
+                return FakeResponse()
 
-        # _create_client를 mock하여 동작하는 클라이언트를 반환
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "content": "test response",
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-            "session_id": "test-session",
-        }
-        mock_response.raise_for_status = MagicMock()
-
-        mock_new_client = AsyncMock()
-        mock_new_client.is_closed = False
-        mock_new_client.post = AsyncMock(return_value=mock_response)
-
-        with patch.object(client, "_create_client", return_value=mock_new_client):
-            result = await client.complete(
-                provider="openai",
-                model="gpt-5-mini",
-                messages=[{"role": "user", "content": "test"}],
+        async def judge_once(observer):
+            return await observer.judge(
+                channel_id="C_TEST",
+                digest=None,
+                judged_messages=[],
+                pending_messages=[{"ts": "1001.0", "text": "테스트 메시지"}],
+                thread_buffers={},
             )
 
-        assert result.content == "test response"
-        mock_new_client.post.assert_called_once()
+        with patch(
+            "seosoyoung_plugins.soulstream_client.httpx.AsyncClient",
+            LoopBoundAsyncClient,
+        ):
+            client = SoulstreamClient(
+                base_url="http://localhost:4105",
+                bearer_token="test-token",
+            )
+            observer = ChannelObserver(client)
+
+            first = asyncio.run(judge_once(observer))
+            second = asyncio.run(judge_once(observer))
+
+        assert first is not None
+        assert second is not None
+        assert first.reaction_type == "none"
+        assert second.reaction_type == "none"
+
+        # 요청 단위 AsyncClient면 호출마다 새 client가 만들어진다.
+        assert len(created_clients) == 2
