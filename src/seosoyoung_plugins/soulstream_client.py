@@ -70,15 +70,14 @@ class SoulstreamClient:
 
     channel_observer, memory 플러그인처럼 비동기 컨텍스트에서 사용합니다.
 
-    channel_observer 파이프라인은 매 실행마다 새 이벤트 루프를 생성하므로,
-    이전 루프에서 만든 httpx.AsyncClient가 닫혀 있을 수 있습니다.
-    _ensure_client()로 닫힌 클라이언트를 자동 재생성합니다.
+    channel_observer와 memory 파이프라인은 background thread에서 매번 새
+    event loop를 만들 수 있습니다. httpx.AsyncClient는 loop-bound transport를
+    가질 수 있으므로 인스턴스 수명 동안 보관하지 않고 요청마다 생성합니다.
     """
 
     def __init__(self, base_url: str, bearer_token: str):
         self._base_url = base_url
         self._bearer_token = bearer_token
-        self._client = self._create_client()
 
     def _create_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -86,12 +85,6 @@ class SoulstreamClient:
             headers={"Authorization": f"Bearer {self._bearer_token}"},
             timeout=120.0,
         )
-
-    def _ensure_client(self) -> httpx.AsyncClient:
-        """닫혀 있으면 새 클라이언트를 생성합니다."""
-        if self._client.is_closed:
-            self._client = self._create_client()
-        return self._client
 
     async def complete(
         self,
@@ -118,15 +111,17 @@ class SoulstreamClient:
         payload = _build_payload(
             provider, model, messages, max_tokens, temperature, client_id,
         )
-        client = self._ensure_client()
-        resp = await client.post("/llm/completions", json=payload)
+        async with self._create_client() as client:
+            resp = await client.post("/llm/completions", json=payload)
         resp.raise_for_status()
         return _parse_response(resp.json())
 
     async def close(self):
-        """클라이언트를 닫습니다."""
-        if not self._client.is_closed:
-            await self._client.aclose()
+        """호환용 no-op.
+
+        요청 단위 AsyncClient 전환 후 보관 중인 클라이언트가 없습니다.
+        """
+        return None
 
     async def __aenter__(self):
         return self
