@@ -52,6 +52,14 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.2.0",
+    # tests import soul-common through pythonpath; keep its runtime deps available.
+    "aiosqlite>=0.19.0",
+    "asyncpg>=0.29.0",
+    "fastapi>=0.115.0",
+    "PyJWT>=2.8.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [project.urls]
