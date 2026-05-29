@@ -25,7 +25,12 @@ SAMPLE_CONFIG = {
 }
 
 
-def _lookup_response(*, channel_enabled: bool = True, ready: int = 1) -> dict:
+def _lookup_response(
+    *,
+    channel_enabled: bool = True,
+    ready: int = 1,
+    window_context: dict | None = None,
+) -> dict:
     ready_items = [
         {
             "ts": "1001.000000",
@@ -43,7 +48,7 @@ def _lookup_response(*, channel_enabled: bool = True, ready: int = 1) -> dict:
         {"ts": "1002.000000", "status": "missing_interpretation", "message_id": "msg-2"}
     ]
     items = ready_items + unresolved
-    return {
+    payload = {
         "channel_id": "C_TEST",
         "channel_enabled": channel_enabled,
         "confidence_threshold": 0.75,
@@ -62,6 +67,23 @@ def _lookup_response(*, channel_enabled: bool = True, ready: int = 1) -> dict:
             {"ts": "1001.000000", "status": "disabled_channel"},
             {"ts": "1002.000000", "status": "disabled_channel"},
         ],
+    }
+    if window_context is not None:
+        payload["window_context"] = window_context
+    return payload
+
+
+def _window_context(**overrides) -> dict:
+    return {
+        "summary": "배포 순서와 운영 prompt 정리 여부를 함께 확인하는 흐름",
+        "candidate_angles": ["배포 순서를 먼저 확인", "prompt row 정리는 선택 사항으로 분리"],
+        "open_loops": ["누가 remiel 배포를 실행할지 미정", "window_context 소비 가이드 후속 필요"],
+        "avoid_repetition_notes": ["lookup API 설명 반복 금지"],
+        "participants_focus": ["서소영은 검수와 머지를 담당"],
+        "confidence": 0.86,
+        "from_ts": "1000.000000",
+        "to_ts": "1002.000000",
+        **overrides,
     }
 
 
@@ -110,6 +132,55 @@ class TestRemielLookupClient:
         assert "ready=1" in item["content"]
         assert "배포 설정을 확인해 달라는 요청" in item["content"]
         assert "missing_interpretation" in item["content"]
+
+    def test_render_includes_compact_window_context_when_confident(self):
+        from seosoyoung_plugins.channel_observer.remiel_context import render_remiel_context_item
+
+        item = render_remiel_context_item(_lookup_response(window_context=_window_context()))
+
+        assert item is not None
+        content = item["content"]
+        assert "### window_context" in content
+        assert "- confidence: 0.86" in content
+        assert "- summary: 배포 순서와 운영 prompt 정리 여부를 함께 확인하는 흐름" in content
+        assert "- candidate_angles: 배포 순서를 먼저 확인 / prompt row 정리는 선택 사항으로 분리" in content
+        assert content.index("### window_context") < content.index("### ready")
+
+    def test_render_omits_low_confidence_window_context_but_keeps_ready_items(self):
+        from seosoyoung_plugins.channel_observer.remiel_context import render_remiel_context_item
+
+        item = render_remiel_context_item(
+            _lookup_response(window_context=_window_context(confidence=0.74))
+        )
+
+        assert item is not None
+        assert "### window_context" not in item["content"]
+        assert "배포 설정을 확인해 달라는 요청" in item["content"]
+
+    def test_render_clamps_window_context_length_and_list_count(self):
+        from seosoyoung_plugins.channel_observer.remiel_context import render_remiel_context_item
+
+        long_summary = "요약" * 120
+        long_item = "항목" * 100
+        item = render_remiel_context_item(
+            _lookup_response(
+                window_context=_window_context(
+                    summary=long_summary,
+                    candidate_angles=[long_item, "두 번째", "세 번째는 버림"],
+                )
+            )
+        )
+
+        assert item is not None
+        content = item["content"]
+        summary_line = next(line for line in content.splitlines() if line.startswith("- summary: "))
+        candidate_line = next(
+            line for line in content.splitlines() if line.startswith("- candidate_angles: ")
+        )
+        assert len(summary_line.removeprefix("- summary: ")) <= 160
+        assert len(candidate_line.split(" / ")[0].removeprefix("- candidate_angles: ")) <= 120
+        assert "두 번째" in candidate_line
+        assert "세 번째는 버림" not in candidate_line
 
     @pytest.mark.asyncio
     async def test_lookup_fail_open_on_missing_config(self):

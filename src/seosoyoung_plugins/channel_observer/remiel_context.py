@@ -10,6 +10,11 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+WINDOW_CONTEXT_CONFIDENCE_THRESHOLD = 0.75
+WINDOW_CONTEXT_SUMMARY_LIMIT = 160
+WINDOW_CONTEXT_ITEM_LIMIT = 120
+WINDOW_CONTEXT_LIST_LIMIT = 2
+
 
 @dataclass(frozen=True)
 class RemielContextConfig:
@@ -140,14 +145,17 @@ def _render_payload(payload: dict[str, Any], coverage: dict[str, Any]) -> str:
         f"low_confidence={coverage.get('low_confidence', 0)}, "
         f"stale={coverage.get('stale', 0)}, "
         f"missing={coverage.get('missing_message', 0) + coverage.get('missing_interpretation', 0)}",
-        "",
-        "### ready",
     ]
 
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
     ready_items = [item for item in items if isinstance(item, dict) and item.get("status") == "ready"]
     unresolved_items = [item for item in items if isinstance(item, dict) and item.get("status") != "ready"]
 
+    window_lines = _render_window_context(payload.get("window_context"))
+    if window_lines:
+        lines.extend(["", *window_lines])
+
+    lines.extend(["", "### ready"])
     for item in ready_items:
         lines.extend(_render_ready_item(item))
 
@@ -160,6 +168,61 @@ def _render_payload(payload: dict[str, Any], coverage: dict[str, Any]) -> str:
             lines.append(f"- `{ts}`: {status}{detail}")
 
     return "\n".join(lines).strip()
+
+
+def _render_window_context(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return []
+
+    confidence = value.get("confidence")
+    if (
+        not isinstance(confidence, (int, float))
+        or isinstance(confidence, bool)
+        or confidence < WINDOW_CONTEXT_CONFIDENCE_THRESHOLD
+    ):
+        return []
+
+    summary = _compact_text(value.get("summary"), WINDOW_CONTEXT_SUMMARY_LIMIT)
+    if not summary:
+        return []
+
+    lines = [
+        "### window_context",
+        f"- confidence: {confidence}",
+        f"- summary: {summary}",
+    ]
+    for key in (
+        "candidate_angles",
+        "open_loops",
+        "avoid_repetition_notes",
+        "participants_focus",
+    ):
+        rendered = _compact_list(value.get(key))
+        if rendered:
+            lines.append(f"- {key}: {' / '.join(rendered)}")
+    return lines
+
+
+def _compact_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    rendered: list[str] = []
+    for item in value:
+        text = _compact_text(item, WINDOW_CONTEXT_ITEM_LIMIT)
+        if text:
+            rendered.append(text)
+        if len(rendered) >= WINDOW_CONTEXT_LIST_LIMIT:
+            break
+    return rendered
+
+
+def _compact_text(value: Any, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 3]}..."
 
 
 def _render_ready_item(item: dict[str, Any]) -> list[str]:
