@@ -9,6 +9,7 @@ Available plugins:
 - translate: Channel message translation (Korean ↔ English)
 - channel_observer: Channel observation and intervention
 - memory: Memory observation and reflection
+- sns_sourcing: SNS material sourcing and draft generation
 """
 
 __version__ = "0.1.0"
@@ -19,11 +20,13 @@ try:
     from seosoyoung_plugins.trello.plugin import TrelloPlugin
     from seosoyoung_plugins.translate.plugin import TranslatePlugin
     from seosoyoung_plugins.channel_observer.plugin import ChannelObserverPlugin
+    from seosoyoung_plugins.sns_sourcing.plugin import SnsSourcingPlugin
 
     __all__ = [
         "TrelloPlugin",
         "TranslatePlugin",
         "ChannelObserverPlugin",
+        "SnsSourcingPlugin",
     ]
 except ImportError:
     # plugin_sdk not available (e.g., running migration scripts)

@@ -49,7 +49,7 @@ def mock_plugin_sdk():
         mock_soulstream.run = AsyncMock(return_value=RunResult(
             ok=True, status=RunStatus.COMPLETED, output="mock response",
         ))
-        mock_soulstream.get_session_id = AsyncMock(return_value=None)
+        mock_soulstream.get_session_id = MagicMock(return_value=None)
         mock_soulstream.compact = AsyncMock()
         mock_soulstream.update_session_id = AsyncMock()
 

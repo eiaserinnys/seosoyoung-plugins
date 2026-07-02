@@ -1091,7 +1091,7 @@ class TestMultiCardChainingIntegration:
         watcher = _make_watcher(tmp_path)
 
         # plugin_sdk.soulstream.get_session_id가 session_id를 반환하도록 설정
-        mock_plugin_sdk["soulstream"].get_session_id = AsyncMock(return_value="test-session")
+        mock_plugin_sdk["soulstream"].get_session_id = MagicMock(return_value="test-session")
         # plugin_sdk.soulstream.compact가 TimeoutError를 raise하도록 설정
         mock_plugin_sdk["soulstream"].compact = AsyncMock(side_effect=concurrent.futures.TimeoutError())
 

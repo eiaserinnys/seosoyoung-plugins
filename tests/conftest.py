@@ -85,7 +85,7 @@ def mock_plugin_sdk():
 
         # soulstream methods are async
         mock_soulstream.run = _make_default_soulstream_run_mock()
-        mock_soulstream.get_session_id = AsyncMock(return_value=None)
+        mock_soulstream.get_session_id = MagicMock(return_value=None)
         mock_soulstream.compact = AsyncMock()
         mock_soulstream.update_session_id = AsyncMock()
 
