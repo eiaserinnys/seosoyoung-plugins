@@ -73,6 +73,10 @@ class SlackHistoryCollector:
         page_limit: int = 100,
         max_pages_per_channel: int = 2,
         bootstrap: str = "now",
+        media_only: bool = True,
+        media_mimetype_prefixes: list[str] | None = None,
+        context_before: int = 3,
+        context_after: int = 3,
         slack_api: Any = slack,
     ):
         self.store = store
@@ -82,11 +86,21 @@ class SlackHistoryCollector:
         self.page_limit = page_limit
         self.max_pages_per_channel = max_pages_per_channel
         self.bootstrap = bootstrap
+        self.media_only = media_only
+        self.media_mimetype_prefixes = (
+            ["image/", "video/"]
+            if media_mimetype_prefixes is None
+            else media_mimetype_prefixes
+        )
+        self.context_before = context_before
+        self.context_after = context_after
         self.slack = slack_api
+        self.scanned_until_by_channel: dict[str, str] = {}
 
     async def collect(self) -> list[SnsCandidate]:
         candidates: list[SnsCandidate] = []
         known_keys = self.store.ledger_keys()
+        self.scanned_until_by_channel = {}
         for source in self.source_channels:
             candidates.extend(await self._collect_channel(source, known_keys))
         return sorted(candidates, key=lambda c: (c.channel_id, Decimal(c.ts)))
@@ -103,6 +117,7 @@ class SlackHistoryCollector:
 
         page_cursor: str | None = None
         messages: list[Message] = []
+        truncated = False
         for _ in range(self.max_pages_per_channel):
             page = await self.slack.get_channel_history_page(
                 source.id,
@@ -112,13 +127,20 @@ class SlackHistoryCollector:
             )
             messages.extend(page.messages)
             if not page.has_more or not page.next_cursor:
+                truncated = False
                 break
             page_cursor = page.next_cursor
+            truncated = True
 
         ordered = sorted(messages, key=lambda msg: Decimal(msg.ts))
+        if ordered and not truncated:
+            self.scanned_until_by_channel[source.id] = ordered[-1].ts
+
         candidates: list[SnsCandidate] = []
         for index, msg in enumerate(ordered):
             if self._should_skip_message(msg):
+                continue
+            if not self._is_candidate_message(msg):
                 continue
             key = self.store.candidate_key(source.id, msg.ts)
             if key in known_keys:
@@ -137,6 +159,14 @@ class SlackHistoryCollector:
         if not msg.text and not msg.files:
             return True
         return False
+
+    def _is_candidate_message(self, msg: Message) -> bool:
+        if self.media_only:
+            return any(
+                _mimetype_matches(file.mimetype, self.media_mimetype_prefixes)
+                for file in msg.files
+            )
+        return bool(msg.text or msg.files)
 
     def _to_candidate(
         self,
@@ -161,14 +191,27 @@ class SlackHistoryCollector:
                     permalink=file.permalink,
                 )
                 for file in msg.files
+                if not self.media_only
+                or _mimetype_matches(file.mimetype, self.media_mimetype_prefixes)
             ],
-            context=_nearby_context(ordered, index),
+            context=_nearby_context(
+                ordered,
+                index,
+                before=self.context_before,
+                after=self.context_after,
+            ),
         )
 
 
-def _nearby_context(messages: list[Message], index: int) -> list[dict[str, str]]:
-    start = max(0, index - 2)
-    end = min(len(messages), index + 3)
+def _nearby_context(
+    messages: list[Message],
+    index: int,
+    *,
+    before: int,
+    after: int,
+) -> list[dict[str, str]]:
+    start = max(0, index - max(0, before))
+    end = min(len(messages), index + max(0, after) + 1)
     return [
         {"ts": msg.ts, "user": msg.user, "text": msg.text}
         for msg in messages[start:end]
@@ -176,6 +219,9 @@ def _nearby_context(messages: list[Message], index: int) -> list[dict[str, str]]
     ]
 
 
+def _mimetype_matches(mimetype: str, prefixes: list[str]) -> bool:
+    return any(mimetype.startswith(prefix) for prefix in prefixes)
+
+
 def _slack_ts_now() -> str:
     return f"{time.time():.6f}"
-

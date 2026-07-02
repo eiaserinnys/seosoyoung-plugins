@@ -18,6 +18,10 @@ BASE_CONFIG = {
 }
 
 
+def test_plugin_meta_version_is_r5():
+    assert SnsSourcingPlugin.meta.version == "1.1.0"
+
+
 @pytest.mark.asyncio
 async def test_node_guard_uses_preferred_node_fallback(monkeypatch):
     monkeypatch.delenv("SOULSTREAM_NODE_ID", raising=False)
@@ -54,4 +58,3 @@ async def test_node_guard_fail_closed_on_mismatch(monkeypatch):
     await plugin.on_load(BASE_CONFIG)
 
     assert plugin._active is False
-

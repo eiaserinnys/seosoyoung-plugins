@@ -7,7 +7,7 @@ from seosoyoung_plugins.sns_sourcing.session import (
 )
 
 
-def test_prompt_contains_r4_self_vision_fallback():
+def test_prompt_makes_media_review_the_default_step():
     prompt = build_classification_prompt(
         [
             SnsCandidate(
@@ -25,6 +25,10 @@ def test_prompt_contains_r4_self_vision_fallback():
     assert "slack_download_thread_files" in prompt
     assert "/usr/bin/ffmpeg" in prompt
     assert "6~9" in prompt
+    assert "후보는 이미지/영상 첨부가 있는 Slack 메시지" in prompt
+    assert "먼저 미디어를 확인" in prompt
+    assert "텍스트 맥락만으로 non_public이 명백" in prompt
+    assert "비전 판독은 폴백" not in prompt
 
 
 def test_parse_decision_payload_from_fenced_json():
@@ -42,4 +46,3 @@ def test_parse_rejects_invalid_label():
         parse_decision_payload(
             '{"decisions":[{"channel_id":"C1","ts":"1.000001","label":"maybe"}]}'
         )
-

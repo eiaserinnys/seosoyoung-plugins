@@ -28,7 +28,7 @@ class SnsSourcingPlugin(Plugin):
 
     meta = PluginMeta(
         name="sns_sourcing",
-        version="1.0.0",
+        version="1.1.0",
         description="Collect Slack SNS candidates, classify them, and post drafts",
     )
 
@@ -78,6 +78,15 @@ class SnsSourcingPlugin(Plugin):
             ),
             max_pages_per_channel=int(scan_config.get("max_pages_per_channel_per_tick", 2)),
             bootstrap=config.get("bootstrap", scan_config.get("first_run", "now")),
+            media_only=bool(scan_config.get("media_only", config.get("media_only", True))),
+            media_mimetype_prefixes=_string_list(
+                scan_config.get(
+                    "media_mimetype_prefixes",
+                    config.get("media_mimetype_prefixes", ["image/", "video/"]),
+                )
+            ),
+            context_before=int(scan_config.get("context_before", 3)),
+            context_after=int(scan_config.get("context_after", 3)),
         )
         decision_session = SnsDecisionSession(
             output_channel=output_channel,
@@ -212,3 +221,8 @@ def _state_dir(config: dict[str, Any]) -> Path:
     subdir = state.get("subdir", "sns_sourcing")
     return soulstream.get_data_dir() / subdir
 
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]

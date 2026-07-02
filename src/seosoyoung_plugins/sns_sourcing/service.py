@@ -92,15 +92,39 @@ class SnsSourcingService:
                     summary.errors += 1
                     self._record_error(candidate, slot_key, "publish", exc)
 
-        self._advance_confirmed_cursors(candidates)
+        self._advance_confirmed_cursors(
+            candidates,
+            getattr(self.collector, "scanned_until_by_channel", None),
+        )
         return summary
 
-    def _advance_confirmed_cursors(self, candidates: list[SnsCandidate]) -> None:
+    def _advance_confirmed_cursors(
+        self,
+        candidates: list[SnsCandidate],
+        scanned_until_by_channel: dict[str, str] | None = None,
+    ) -> None:
         by_channel: dict[str, list[SnsCandidate]] = {}
         for candidate in candidates:
             by_channel.setdefault(candidate.channel_id, []).append(candidate)
 
         ledger_keys = self.store.ledger_keys()
+
+        if scanned_until_by_channel is not None:
+            for channel_id, scanned_until in scanned_until_by_channel.items():
+                cursor = scanned_until
+                last_confirmed = ""
+                for candidate in sorted(
+                    by_channel.get(channel_id, []),
+                    key=lambda c: Decimal(c.ts),
+                ):
+                    if candidate.key not in ledger_keys:
+                        cursor = last_confirmed
+                        break
+                    last_confirmed = candidate.ts
+                if cursor:
+                    self.store.advance_cursor(channel_id, cursor)
+            return
+
         for channel_id, channel_candidates in by_channel.items():
             last_confirmed = ""
             for candidate in sorted(channel_candidates, key=lambda c: Decimal(c.ts)):
@@ -133,4 +157,3 @@ class SnsSourcingService:
 def _chunks(items: list[SnsCandidate], size: int):
     for index in range(0, len(items), max(1, size)):
         yield items[index : index + size]
-
