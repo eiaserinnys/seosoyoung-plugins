@@ -18,6 +18,7 @@ from seosoyoung_plugins.channel_observer.observer import (
 from seosoyoung_plugins.channel_observer.pipeline import (
     _apply_importance_modifiers,
     _filter_already_reacted,
+    _message_pass_threshold,
     _validate_linked_messages,
     run_channel_pipeline,
 )
@@ -1397,6 +1398,18 @@ class TestBugD_FilterNonPendingJudgeItems:
 
 class TestPipelineBurstCooldown:
     """burst/cooldown 모델 파이프라인 통합 테스트"""
+
+    def test_burst_threshold_honors_configured_floor(self):
+        """burst 중에도 설정 임계치가 0.35보다 높으면 그 값을 사용한다."""
+        assert _message_pass_threshold(1.0, 0.72) == 0.72
+
+    def test_burst_threshold_keeps_legacy_minimum(self):
+        """낮은 설정값은 기존 burst 최소 문턱인 0.35 밑으로 내리지 않는다."""
+        assert _message_pass_threshold(1.0, 0.0) == 0.35
+
+    def test_cooldown_threshold_uses_configured_value(self):
+        """burst 밖에서는 설정 임계치를 그대로 사용한다."""
+        assert _message_pass_threshold(30.0, 0.42) == 0.42
 
     @pytest.mark.asyncio
     async def test_burst_consecutive_interventions_pass(self, store, channel_id, mock_plugin_sdk):

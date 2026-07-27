@@ -48,6 +48,9 @@ from seosoyoung_plugins.memory.token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
 
+BURST_GAP_MINUTES = 5
+BURST_MIN_THRESHOLD = 0.35
+
 
 def _intervention_thinking_emoji() -> str:
     """개입 '생각 중' 이모지 — 호출 시점에 환경변수를 읽어 dotenv 로딩 순서에 무관하게 동작"""
@@ -280,6 +283,20 @@ def _filter_mention_thread_actions(
         else:
             filtered.append(action)
     return filtered
+
+
+def _message_pass_threshold(
+    minutes_since_last: float,
+    intervention_threshold: float,
+) -> float:
+    """Return the threshold used for channel message interventions.
+
+    During a short burst we keep the old minimum floor, but allow the
+    configured intervention threshold to raise that floor.
+    """
+    if minutes_since_last <= BURST_GAP_MINUTES:
+        return max(BURST_MIN_THRESHOLD, intervention_threshold)
+    return intervention_threshold
 
 
 async def run_channel_pipeline(
@@ -586,18 +603,18 @@ async def _handle_multi_judge(
 
         # burst 진행 중 여부에 따라 판정 분기
         mins_since = cooldown.minutes_since_last(channel_id)
-        BURST_GAP = 5  # burst_intervention_probability와 동일한 상수
-        if mins_since <= BURST_GAP:
+        pass_threshold = _message_pass_threshold(mins_since, intervention_threshold)
+        if mins_since <= BURST_GAP_MINUTES:
             # burst 내에서는 prob 자체가 판정 기준
             final_score = prob
-            passed = final_score >= 0.35
+            passed = final_score >= pass_threshold
             # 디버그 호환: burst 내에서는 time/freq를 burst 정보로 대체
             time_factor = prob
             freq_factor = 1.0
         else:
             # cooldown 구간에서는 importance 가중
             final_score = (importance_for_prob / 10.0) * prob
-            passed = final_score >= intervention_threshold
+            passed = final_score >= pass_threshold
             time_factor = prob
             freq_factor = importance_for_prob / 10.0
 
@@ -609,7 +626,7 @@ async def _handle_multi_judge(
             freq_factor=freq_factor,
             probability=prob,
             final_score=final_score,
-            threshold=0.35 if mins_since <= BURST_GAP else intervention_threshold,
+            threshold=pass_threshold,
             passed=passed,
         )
 
@@ -742,15 +759,15 @@ async def _handle_single_judge(
 
             # burst 진행 중 여부에 따라 판정 분기
             mins_since = cooldown.minutes_since_last(channel_id)
-            BURST_GAP = 5  # burst_intervention_probability와 동일한 상수
-            if mins_since <= BURST_GAP:
+            pass_threshold = _message_pass_threshold(mins_since, intervention_threshold)
+            if mins_since <= BURST_GAP_MINUTES:
                 final_score = prob
-                passed = final_score >= 0.35
+                passed = final_score >= pass_threshold
                 time_factor = prob
                 freq_factor = 1.0
             else:
                 final_score = (judge_result.importance / 10.0) * prob
-                passed = final_score >= intervention_threshold
+                passed = final_score >= pass_threshold
                 time_factor = prob
                 freq_factor = judge_result.importance / 10.0
 
@@ -762,7 +779,7 @@ async def _handle_single_judge(
                 freq_factor=freq_factor,
                 probability=prob,
                 final_score=final_score,
-                threshold=0.35 if mins_since <= BURST_GAP else intervention_threshold,
+                threshold=pass_threshold,
                 passed=passed,
             )
 

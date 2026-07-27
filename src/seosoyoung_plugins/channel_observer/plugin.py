@@ -67,13 +67,13 @@ class ChannelObserverPlugin(Plugin):
             "digest_target_tokens", 5000
         )
         self._intervention_threshold: float = config.get(
-            "intervention_threshold", 0.18
+            "intervention_threshold", 0.35
         )
-        self._react_probability: float = config.get("react_probability", 1.0)
+        self._react_probability: float = config.get("react_probability", 0.25)
         self._recent_messages_count: int = config.get(
             "recent_messages_count", 5
         )
-        self._periodic_sec: int = config.get("periodic_sec", 300)
+        self._periodic_sec: int = config.get("periodic_sec", 600)
         self._intervene_model: str | None = config.get("intervene_model", None)
         self._intervene_folder_id: str | None = config.get("folder_id", None)
         self._intervene_agent_id: str | None = config.get("agent_id", None)

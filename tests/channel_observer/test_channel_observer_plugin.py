@@ -79,7 +79,9 @@ class TestChannelObserverPluginLifecycle:
         await plugin.on_load(minimal)
         assert plugin._channels == []
         assert plugin._threshold_a == 150
-        assert plugin._periodic_sec == 300
+        assert plugin._intervention_threshold == 0.35
+        assert plugin._react_probability == 0.25
+        assert plugin._periodic_sec == 600
 
     @pytest.mark.asyncio
     async def test_on_unload_without_scheduler(self, plugin):
