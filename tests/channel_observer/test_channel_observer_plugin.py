@@ -82,6 +82,38 @@ class TestChannelObserverPluginLifecycle:
         assert plugin._periodic_sec == 300
 
     @pytest.mark.asyncio
+    async def test_on_load_builds_prep_services_from_existing_config(
+        self, plugin, monkeypatch,
+    ):
+        monkeypatch.setenv("TEST_ATOM_AGENT_KEY", "secret")
+        monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", "/tmp/test-workspace")
+        await plugin.on_load(
+            {
+                **SAMPLE_CONFIG,
+                "atom_base_url": "https://atom.test",
+                "atom_api_key_env": "TEST_ATOM_AGENT_KEY",
+            }
+        )
+
+        assert str(plugin._prep_services.output_dir) == "/tmp/test-workspace/.local/tmp"
+        assert callable(plugin._prep_services.search_cards)
+        assert callable(plugin._prep_services.set_session_name)
+
+    @pytest.mark.asyncio
+    async def test_warns_when_agent_profile_makes_intervene_model_ineffective(
+        self, plugin, caplog,
+    ):
+        await plugin.on_load({
+            **SAMPLE_CONFIG,
+            "agent_id": "seosoyoung_codex",
+            "intervene_model": "claude-opus-4-6",
+        })
+
+        assert "agent_id" in caplog.text
+        assert "intervene_model" in caplog.text
+        assert "무효" in caplog.text
+
+    @pytest.mark.asyncio
     async def test_on_unload_without_scheduler(self, plugin):
         await plugin.on_load(SAMPLE_CONFIG)
         await plugin.on_unload()  # should not raise
@@ -386,6 +418,18 @@ class TestLlmCallCreation:
         assert callable(p._llm_call)
 
     @pytest.mark.asyncio
+    async def test_llm_call_uses_prep_model_not_compressor_model(self):
+        p = ChannelObserverPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+        p._soulstream.complete = AsyncMock(
+            return_value=MagicMock(content='{"ok": true}')
+        )
+
+        await p._llm_call("system", "user")
+
+        assert p._soulstream.complete.call_args.kwargs["model"] == "gpt-5-mini"
+
+    @pytest.mark.asyncio
     async def test_llm_call_none_when_no_soulstream_url(self):
         """soulstream_url이 없으면 _llm_call이 None입니다."""
         p = ChannelObserverPlugin()
@@ -425,6 +469,7 @@ class TestLlmCallCreation:
                 call_kwargs = mock_pipeline.call_args.kwargs
                 assert "llm_call" in call_kwargs
                 assert call_kwargs["llm_call"] is p._llm_call
+                assert call_kwargs["prep_services"] is p._prep_services
 
     @pytest.mark.asyncio
     async def test_llm_call_passed_to_scheduler(self):
@@ -479,6 +524,7 @@ class TestLlmCallCreation:
             call_kwargs = mock_scheduler_cls.call_args.kwargs
             assert "llm_call" in call_kwargs
             assert call_kwargs["llm_call"] is p._llm_call
+            assert call_kwargs["prep_services"] is p._prep_services
 
 
 class TestChannelObserverManagerIntegration:

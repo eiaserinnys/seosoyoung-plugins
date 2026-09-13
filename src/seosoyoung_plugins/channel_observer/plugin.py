@@ -15,6 +15,14 @@ from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung_plugins.channel_observer import pipeline_lock
+from seosoyoung_plugins.channel_observer.intervention_prep import (
+    InterventionPrepServices,
+    default_prep_output_dir,
+)
+from seosoyoung_plugins.channel_observer.mcp_http import (
+    make_atom_search_cards,
+    make_session_name_setter,
+)
 from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
@@ -82,6 +90,14 @@ class ChannelObserverPlugin(Plugin):
         self._debug_channel: str = config.get("debug_channel", "")
         self._remiel_config = RemielContextConfig.from_plugin_config(config)
 
+        if self._intervene_agent_id and self._intervene_model:
+            logger.warning(
+                "agent_id=%s가 agent profile 모델을 우선하므로 "
+                "intervene_model=%s 설정은 무효입니다",
+                self._intervene_agent_id,
+                self._intervene_model,
+            )
+
         # Runtime components (initialized in on_startup)
         self._store = None
         self._collector = None
@@ -91,6 +107,13 @@ class ChannelObserverPlugin(Plugin):
         self._scheduler = None
         self._llm_call = (
             self._make_llm_call() if self._soulstream else None
+        )
+        self._prep_services = InterventionPrepServices(
+            output_dir=default_prep_output_dir(),
+            search_cards=make_atom_search_cards(config),
+            set_session_name=make_session_name_setter(
+                soulstream_url, soulstream_token,
+            ),
         )
 
         logger.info(
@@ -184,6 +207,7 @@ class ChannelObserverPlugin(Plugin):
                 folder_id=self._intervene_folder_id,
                 agent_id=self._intervene_agent_id,
                 remiel_config=self._remiel_config,
+                prep_services=self._prep_services,
             )
             self._scheduler.start()
 
@@ -280,10 +304,10 @@ class ChannelObserverPlugin(Plugin):
         pipeline.py의 llm_call 시그니처에 맞춰
         async def(system_prompt, user_prompt) -> str 를 반환합니다.
         소울스트림 프록시를 통해 호출하며,
-        응답 생성에는 compressor_model(고성능 모델)을 사용합니다.
+        준비물 생성에는 channel observer model(gpt-5-mini 기본값)을 사용합니다.
         """
         soulstream = self._soulstream
-        model = self._compressor_model
+        model = self._model
 
         async def llm_call(
             system_prompt: str, user_prompt: str
@@ -358,6 +382,7 @@ class ChannelObserverPlugin(Plugin):
                             folder_id=self._intervene_folder_id,
                             agent_id=self._intervene_agent_id,
                             remiel_config=self._remiel_config,
+                            prep_services=self._prep_services,
                         )
                     )
                 finally:

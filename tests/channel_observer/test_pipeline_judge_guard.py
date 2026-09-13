@@ -114,6 +114,28 @@ class TestBug2_EmptyPendingSkipJudge:
         observer.judge.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_zero_pending_tokens_returns_before_digest_or_judge(self):
+        store = _make_store_with_thread_buffer(
+            pending_messages=[],
+            thread_buffers={},
+            pending_tokens=0,
+        )
+        observer = _make_observer()
+
+        await run_channel_pipeline(
+            store=store,
+            observer=observer,
+            channel_id="C_TEST",
+            cooldown=_make_cooldown(),
+            threshold_a=0,
+            threshold_b=0,
+        )
+
+        store.count_judged_plus_pending_tokens.assert_not_called()
+        observer.digest.assert_not_called()
+        observer.judge.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_mention_filtered_pending_skips_judge(self):
         """멘션 스레드 필터링 후 judge_pending이 0건이면 judge()를 건너뛴다."""
         # pending에 메시지가 있지만 모두 멘션 스레드에 속함
