@@ -1,5 +1,6 @@
 """스케줄러의 pipeline_lock 통합 테스트"""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -97,3 +98,16 @@ class TestSchedulerPipelineLock:
         # C001은 _run_pipeline이 호출되지만 lock에 의해 실제 pipeline은 스킵
         # C002는 정상 실행
         pipeline_lock.release("C001")
+
+    def test_empty_channel_skips_with_debug_log(self, mock_deps, caplog):
+        mock_deps["store"].count_pending_tokens.return_value = 0
+        scheduler = make_scheduler(mock_deps)
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch.object(scheduler, "_run_pipeline") as mock_run,
+        ):
+            scheduler._check_and_digest()
+
+        mock_run.assert_not_called()
+        assert "pending/thread 신규 메시지 없음" in caplog.text

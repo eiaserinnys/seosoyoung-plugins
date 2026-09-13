@@ -6,6 +6,10 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 3. judge() 호출 (digest + judged + pending → 메시지별 리액션 판단)
 4. 리액션 처리 (이모지 일괄 + 확률 기반 개입 판단 + 슬랙 발송)
 5. pending을 judged로 이동
+
+이 모듈은 기존 테스트가 내부 정책 함수와 SDK patch surface를 직접 참조하는 호환
+facade라 500줄을 초과한다. 이번 변경의 신규 준비 로직과 외부 wire 로직은 각각
+intervention_prep.py, knowledge_context.py, mcp_http.py에 두고 여기에는 orchestration만 둔다.
 """
 
 import asyncio
@@ -32,6 +36,14 @@ from seosoyoung_plugins.channel_observer.intervention import (
     send_debug_log,
     send_intervention_probability_debug_log,
     send_multi_judge_debug_log,
+)
+from seosoyoung_plugins.channel_observer.intervention_prep import (
+    InterventionPrepServices,
+    build_intervention_prep,
+    run_and_name_session,
+)
+from seosoyoung_plugins.channel_observer.knowledge_context import (
+    build_knowledge_context_item,
 )
 from seosoyoung_plugins.channel_observer.observer import (
     ChannelObserver,
@@ -306,6 +318,7 @@ async def run_channel_pipeline(
     folder_id: str | None = None,
     agent_id: str | None = None,
     remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
     **kwargs,
 ) -> None:
     """소화/판단 분리 파이프라인을 실행합니다.
@@ -321,6 +334,9 @@ async def run_channel_pipeline(
 
     # a) pending 토큰 확인
     pending_tokens = store.count_pending_tokens(channel_id)
+    if pending_tokens <= 0:
+        logger.debug(f"파이프라인 스킵 ({channel_id}): pending 토큰 없음")
+        return
     if pending_tokens < threshold_a:
         logger.debug(
             f"파이프라인 스킵 ({channel_id}): "
@@ -508,6 +524,7 @@ async def run_channel_pipeline(
                 folder_id=folder_id,
                 agent_id=agent_id,
                 remiel_config=remiel_config,
+                prep_services=prep_services,
             )
         else:
             # 하위호환: 단일 판단 경로
@@ -533,6 +550,7 @@ async def run_channel_pipeline(
                 folder_id=folder_id,
                 agent_id=agent_id,
                 remiel_config=remiel_config,
+                prep_services=prep_services,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
@@ -559,6 +577,7 @@ async def _handle_multi_judge(
     folder_id: str | None = None,
     agent_id: str | None = None,
     remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
     **kwargs,
 ) -> None:
     """복수 JudgeItem 처리: 이모지 일괄 + 개입 확률 판단"""
@@ -654,6 +673,7 @@ async def _handle_multi_judge(
                             folder_id=folder_id,
                             agent_id=agent_id,
                             remiel_config=remiel_config,
+                            prep_services=prep_services,
                         )
                     else:
                         await execute_interventions(channel_id, [action])
@@ -693,6 +713,7 @@ async def _handle_single_judge(
     folder_id: str | None = None,
     agent_id: str | None = None,
     remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
     **kwargs,
 ) -> None:
     """하위호환: 단일 JudgeResult 처리"""
@@ -797,6 +818,7 @@ async def _handle_single_judge(
                             folder_id=folder_id,
                             agent_id=agent_id,
                             remiel_config=remiel_config,
+                            prep_services=prep_services,
                         )
                 else:
                     await execute_interventions(channel_id, message_actions)
@@ -867,6 +889,7 @@ async def _execute_intervene(
     folder_id: str | None = None,
     agent_id: str | None = None,
     remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
     **kwargs,
 ) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
@@ -962,6 +985,25 @@ async def _execute_intervene(
         # },
     ]
 
+    services = prep_services or InterventionPrepServices()
+    prep = await build_intervention_prep(
+        llm_call=llm_call,
+        channel_id=channel_id,
+        thread_context=thread_context,
+        output_dir=services.output_dir,
+        message_timestamps=remiel_timestamps,
+    )
+    if prep:
+        context_items.append(prep.context_item)
+
+        knowledge_context_item = await build_knowledge_context_item(
+            prep.keywords,
+            services.search_cards,
+            timeout=2.0,
+        )
+        if knowledge_context_item:
+            context_items.append(knowledge_context_item)
+
     remiel_context_item = await build_remiel_context_item(
         remiel_config,
         channel_id=channel_id,
@@ -972,25 +1014,31 @@ async def _execute_intervene(
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
     try:
-        result = await soulstream.run(
-            prompt=prompt,
-            channel=channel_id,
-            thread_ts=run_thread_ts,
-            text_only=True,
-            context=context_items,
-            model=intervene_model,
-            folder_id=folder_id,
-            agent_id=agent_id,
-            # R-4 fix(2026-05-11, atom G-12 + G-14): plugin_sdk helper로 정본 통합.
-            # build_bot_caller_info — display_name + server-relative avatar_url 박음 (R-3 G-5 정합).
-            # get_host_preferred_node — host config Config.orchestrator.preferred_node 동적 조회 → caller_info.agent_node.
-            # truthy면 채움(다중 노드 audit 가시성), None이면 키 부재(자동 라우팅 graceful).
-            # 정본: seosoyoung/plugin_sdk/caller_info.py (cross-import 회귀로 soul_common 정본과 시그니처 정합).
-            caller_info=build_bot_caller_info(
-                source="channel_observer",
-                display_name="채널 관찰자",
-                agent_node=get_host_preferred_node(),
+        result = await run_and_name_session(
+            soulstream.run(
+                prompt=prompt,
+                channel=channel_id,
+                thread_ts=run_thread_ts,
+                text_only=True,
+                context=context_items,
+                model=intervene_model,
+                folder_id=folder_id,
+                agent_id=agent_id,
+                # R-4 fix(2026-05-11, atom G-12 + G-14): plugin_sdk helper로 정본 통합.
+                # build_bot_caller_info — display_name + server-relative avatar_url 박음 (R-3 G-5 정합).
+                # get_host_preferred_node — host config Config.orchestrator.preferred_node 동적 조회 → caller_info.agent_node.
+                # truthy면 채움(다중 노드 audit 가시성), None이면 키 부재(자동 라우팅 graceful).
+                # 정본: seosoyoung/plugin_sdk/caller_info.py (cross-import 회귀로 soul_common 정본과 시그니처 정합).
+                caller_info=build_bot_caller_info(
+                    source="channel_observer",
+                    display_name="채널 관찰자",
+                    agent_node=get_host_preferred_node(),
+                ),
             ),
+            thread_ts=run_thread_ts,
+            suggested_title=prep.suggested_title if prep else None,
+            get_session_id=soulstream.get_session_id,
+            set_session_name=services.set_session_name,
         )
         if not result.ok:
             logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")

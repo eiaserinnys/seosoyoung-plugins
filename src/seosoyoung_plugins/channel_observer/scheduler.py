@@ -10,6 +10,7 @@ import threading
 from typing import Callable, Optional
 
 from seosoyoung_plugins.channel_observer.intervention import InterventionHistory
+from seosoyoung_plugins.channel_observer.intervention_prep import InterventionPrepServices
 from seosoyoung_plugins.channel_observer.observer import ChannelObserver, DigestCompressor
 from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.channel_observer.store import ChannelStore
@@ -47,6 +48,7 @@ class ChannelDigestScheduler:
         folder_id: str | None = None,
         agent_id: str | None = None,
         remiel_config: RemielContextConfig | None = None,
+        prep_services: InterventionPrepServices | None = None,
         **kwargs,
     ):
         self.store = store
@@ -68,6 +70,7 @@ class ChannelDigestScheduler:
         self.folder_id = folder_id
         self.agent_id = agent_id
         self.remiel_config = remiel_config
+        self.prep_services = prep_services
 
         self._timer: threading.Timer | None = None
         self._running = False
@@ -114,6 +117,11 @@ class ChannelDigestScheduler:
             try:
                 pending_tokens = self.store.count_pending_tokens(channel_id)
                 if pending_tokens <= 0:
+                    logger.debug(
+                        "주기적 파이프라인 스킵 (%s): "
+                        "pending/thread 신규 메시지 없음",
+                        channel_id,
+                    )
                     continue
 
                 # 이미 임계치를 초과한 경우 → 메시지 이벤트에서 트리거될 것이므로 스킵
@@ -160,6 +168,7 @@ class ChannelDigestScheduler:
                 folder_id=self.folder_id,
                 agent_id=self.agent_id,
                 remiel_config=self.remiel_config,
+                prep_services=self.prep_services,
             )
             try:
                 asyncio.run(pipeline_coro)
