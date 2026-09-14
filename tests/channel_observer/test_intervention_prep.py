@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -311,3 +312,28 @@ async def test_execute_atom_and_session_name_failures_do_not_block_intervention(
     ]
     services.set_session_name.assert_awaited_once()
     mock_plugin_sdk["slack"].send_message.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_build_prep_missing_output_dir_warns_instead_of_silent_skip(caplog):
+    """SCRATCH_WORKSPACE_DIR 누락(output_dir=None)은 fail-open이되 경고를 남긴다 (2026-09-14)."""
+    calls = []
+
+    async def llm_call(system, user):
+        calls.append((system, user))
+        return "{}"
+
+    with caplog.at_level(logging.WARNING):
+        result = await build_intervention_prep(
+            llm_call=llm_call,
+            channel_id="C123",
+            thread_context="[C123:1.0] <a>: hi",
+            output_dir=None,
+        )
+
+    assert result is None
+    assert calls == []
+    assert any(
+        "intervene prep skip" in rec.message and "output_dir=missing" in rec.message
+        for rec in caplog.records
+    )
