@@ -6,12 +6,65 @@ DisplayNameResolver와 resolver 적용 포맷을 검증합니다.
 
 from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
+    build_judge_system_prompt,
     _format_channel_messages,
     _format_extra_content,
     _format_files,
     _format_pending_messages,
     _format_thread_messages,
 )
+
+
+class TestJudgeInterveneHardRules:
+    """E1: 멤버에게 훈수하는 개입을 프롬프트 계약으로 차단한다."""
+
+    def test_hard_rules_precede_intervene_batch_guidance(self):
+        prompt = build_judge_system_prompt()
+
+        hard_rules = prompt.index("## INTERVENE HARD RULES (check BEFORE scoring)")
+        batch_guidance = prompt.index("At most ONE intervene per batch")
+
+        assert hard_rules < batch_guidance
+        assert "Addressed to someone else." in prompt
+        assert "Thread already in progress." in prompt
+        assert "Only advice to offer." in prompt
+        assert "score it 0–4 and choose `none`" in prompt
+        assert "나도 알아... 서소영" in prompt
+
+    def test_boke_weight_excludes_member_decisions_and_eb_interventions(self):
+        prompt = build_judge_system_prompt()
+
+        assert (
+            "서소영이 보케(농담·용어를 진지하게 잘못 알아듣거나 엉뚱한 걱정을 해서 "
+            "*본인이 바보같아 보이는* 한마디)를 던질 소재가 있는 순간: +3 "
+            "(뉴스·외부 콘텐츠·봇 출력·사물에 한함. "
+            "멤버 본인의 결정·작업에 대한 시각은 +0)"
+        ) in prompt
+        assert (
+            "EB (Ember & Blade) project discussion: +2 "
+            "(`react` 판단에만 적용. `intervene` 점수에는 +0)"
+        ) in prompt
+
+    def test_intervene_voice_and_scenarios_require_boke(self):
+        prompt = build_judge_system_prompt()
+
+        assert "서소영 in channel is a *boke*" in prompt
+        assert "If the draft makes her look clever, it is wrong." in prompt
+        assert "바보가 되는 것은 서소영이지 상대가 아니다." in prompt
+        assert "소재가 없으면 none." in prompt
+        assert (
+            "she can earnestly misunderstand or worry about in a silly way — "
+            "not to add insight"
+        ) in prompt
+        assert "a boke: an earnest misunderstanding or silly worry" in prompt
+        assert "대화 속 농담·용어·사소한 디테일을 진지하게 잘못 알아들을 여지가 있을 때" in prompt
+
+        assert "서소영만의 고유한 시각을 더할 수 있는 순간" not in prompt
+        assert "외유내강: 부드럽지만 핵심을 짚는 발언" not in prompt
+        assert "Witty and observant, occasionally playful" not in prompt
+        assert "남들이 놓친 포인트를 짚어줄 수 있을 때" not in prompt
+        assert "대화의 특정 디테일에 재치 있는 코멘트가 떠오를 때" not in prompt
+        assert "흥미로운 토론에 서소영만의 시각을 더할 수 있을 때" not in prompt
 
 
 class TestFormatPendingMessagesReactions:

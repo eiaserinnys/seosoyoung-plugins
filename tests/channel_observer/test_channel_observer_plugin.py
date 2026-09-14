@@ -427,7 +427,20 @@ class TestLlmCallCreation:
 
         await p._llm_call("system", "user")
 
-        assert p._soulstream.complete.call_args.kwargs["model"] == "gpt-5-mini"
+        call = p._soulstream.complete.call_args.kwargs
+        assert call["model"] == "gpt-5-mini"
+        assert call["max_tokens"] == 4096
+
+    @pytest.mark.asyncio
+    async def test_llm_call_rejects_empty_content_with_usage_diagnostic(self):
+        p = ChannelObserverPlugin()
+        await p.on_load(SAMPLE_CONFIG)
+        p._soulstream.complete = AsyncMock(
+            return_value=MagicMock(content="", output_tokens=4096)
+        )
+
+        with pytest.raises(ValueError, match=r"empty content.*output_tokens=4096"):
+            await p._llm_call("system", "user")
 
     @pytest.mark.asyncio
     async def test_llm_call_none_when_no_soulstream_url(self):
