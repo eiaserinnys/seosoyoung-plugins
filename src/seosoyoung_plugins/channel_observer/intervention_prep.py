@@ -183,6 +183,17 @@ async def build_intervention_prep(
 ) -> InterventionPrep | None:
     """Make all LLM-derived prep in exactly one call, or fail open."""
     if llm_call is None or output_dir is None or not thread_context.strip():
+        # fail-open이되 *조용히* 넘기지 않는다 — 준비물이 빠지면 개입 세션이 fallback
+        # 경로(threads-file 자작·제목 미지정)로 4분 넘게 돌던 사고(2026-09-14)의 원인이
+        # 봇 env의 SCRATCH_WORKSPACE_DIR 누락이었는데 로그에 흔적이 없었다.
+        logger.warning(
+            "intervene prep skip (%s): llm_call=%s output_dir=%s thread_context=%s "
+            "— SCRATCH_WORKSPACE_DIR / soulstream 설정을 확인하십시오",
+            channel_id,
+            "ok" if llm_call is not None else "missing",
+            str(output_dir) if output_dir is not None else "missing",
+            "ok" if thread_context.strip() else "empty",
+        )
         return None
     try:
         raw = await llm_call(
