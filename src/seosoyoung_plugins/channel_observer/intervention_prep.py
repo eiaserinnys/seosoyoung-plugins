@@ -52,6 +52,8 @@ def default_prep_output_dir() -> Path | None:
 
 
 def _extract_object(raw: str) -> dict[str, Any]:
+    if not raw.strip():
+        raise ValueError("prep output was empty")
     start = raw.find("{")
     end = raw.rfind("}")
     if start < 0 or end < start:

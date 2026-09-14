@@ -86,6 +86,26 @@ async def test_build_prep_malformed_llm_output_is_fail_open(tmp_path, result):
 
 
 @pytest.mark.asyncio
+async def test_build_prep_empty_llm_content_is_fail_open_with_specific_warning(
+    tmp_path, caplog,
+):
+    llm_call = AsyncMock(return_value="")
+
+    with caplog.at_level(logging.WARNING):
+        prep = await build_intervention_prep(
+            llm_call=llm_call,
+            channel_id="C1",
+            thread_context="[C1:1] <U1>: hello",
+            output_dir=tmp_path,
+        )
+
+    assert prep is None
+    assert llm_call.await_count == 1
+    assert any("prep output was empty" in rec.message for rec in caplog.records)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
 async def test_build_prep_missing_message_summary_is_fail_open(tmp_path):
     llm_call = AsyncMock(
         return_value=json.dumps(

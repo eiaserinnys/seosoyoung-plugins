@@ -6,12 +6,39 @@ DisplayNameResolver와 resolver 적용 포맷을 검증합니다.
 
 from seosoyoung_plugins.channel_observer.prompts import (
     DisplayNameResolver,
+    build_judge_system_prompt,
     _format_channel_messages,
     _format_extra_content,
     _format_files,
     _format_pending_messages,
     _format_thread_messages,
 )
+
+
+class TestJudgeInterveneHardRules:
+    """E1: 멤버에게 훈수하는 개입을 프롬프트 계약으로 차단한다."""
+
+    def test_hard_rules_precede_intervene_batch_guidance(self):
+        prompt = build_judge_system_prompt()
+
+        hard_rules = prompt.index("## INTERVENE HARD RULES (check BEFORE scoring)")
+        batch_guidance = prompt.index("At most ONE intervene per batch")
+
+        assert hard_rules < batch_guidance
+        assert "Addressed to someone else." in prompt
+        assert "Thread already in progress." in prompt
+        assert "Only advice to offer." in prompt
+        assert "score it 0–4 and choose `none`" in prompt
+        assert "나도 알아... 서소영" in prompt
+
+    def test_unique_perspective_weight_excludes_member_decisions(self):
+        prompt = build_judge_system_prompt()
+
+        assert (
+            "서소영만의 고유한 시각을 더할 수 있는 순간: +3 "
+            "(뉴스·외부 콘텐츠·제3자 주장에 한함. "
+            "멤버 본인의 결정·작업에 대한 시각은 +0)"
+        ) in prompt
 
 
 class TestFormatPendingMessagesReactions:

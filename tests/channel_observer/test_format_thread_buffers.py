@@ -78,6 +78,23 @@ class TestFormatThreadBuffers:
         assert "U_BOT: 반갑습니다" in result
         assert "U_USR: 안녕하세요" in result
 
+    def test_selected_thread_is_limited_to_most_recent_twenty_replies(self):
+        messages = [
+            {"ts": f"{index}.0", "user": "U001", "text": f"reply-{index}"}
+            for index in range(25)
+        ]
+
+        result = _format_thread_buffers(
+            {"root.0": messages},
+            thread_timestamps=["root.0"],
+            channel_id="C_TEST",
+        )
+
+        assert "reply-4" not in result
+        assert "reply-5" in result
+        assert "reply-24" in result
+        assert len([line for line in result.splitlines() if line.startswith("  [")]) == 20
+
 
 class TestFormatRecentContext:
     """_format_recent_context 테스트."""

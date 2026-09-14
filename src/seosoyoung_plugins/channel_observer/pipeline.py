@@ -965,11 +965,52 @@ async def _execute_intervene(
 
     prompt = "(채널 개입 트리거)"
 
+    resolver = _make_resolver()
     thread_context, remiel_timestamps = await _fetch_recent_context_bundle(
         channel_id,
         bot_user_id=bot_user_id,
-        resolver=_make_resolver(),
+        resolver=resolver,
     )
+
+    relevant_thread_timestamps: list[str] = []
+    if thread_buffers:
+        trigger_ts = (
+            action.target
+            if action.target and action.target != "channel"
+            else (trigger_message.get("ts") if trigger_message else None)
+        )
+        if trigger_ts and trigger_ts in thread_buffers:
+            relevant_thread_timestamps.append(trigger_ts)
+
+        for message in pending_messages:
+            thread_ts = message.get("thread_ts")
+            if (
+                thread_ts
+                and thread_ts in thread_buffers
+                and thread_ts not in relevant_thread_timestamps
+            ):
+                relevant_thread_timestamps.append(thread_ts)
+
+    thread_replies = _format_thread_buffers(
+        thread_buffers,
+        thread_timestamps=relevant_thread_timestamps,
+        channel_id=channel_id,
+        resolver=resolver,
+        reply_limit=20,
+    )
+    reply_timestamps = [
+        str(message.get("ts"))
+        for thread_ts in relevant_thread_timestamps
+        for message in (thread_buffers or {}).get(thread_ts, [])[-20:]
+        if message.get("ts")
+    ]
+    if thread_replies:
+        replies_section = f"## 스레드 답글\n{thread_replies}"
+        thread_context = (
+            f"{thread_context}\n\n{replies_section}"
+            if thread_context
+            else replies_section
+        )
 
     context_items = [
         {
@@ -991,7 +1032,9 @@ async def _execute_intervene(
         channel_id=channel_id,
         thread_context=thread_context,
         output_dir=services.output_dir,
-        message_timestamps=remiel_timestamps,
+        message_timestamps=list(
+            dict.fromkeys([*remiel_timestamps, *reply_timestamps])
+        ),
     )
     if prep:
         context_items.append(prep.context_item)
@@ -1235,14 +1278,19 @@ def _format_recent_context(
     return "\n".join(lines)
 
 
-# TODO: _format_thread_buffers는 _execute_intervene의 thread_context에서 더 이상 사용하지 않음.
-#       트리거 메시지 검색(L806)에서 thread_buffers를 여전히 참조하므로 파라미터는 유지.
-#       향후 트리거 검색 로직 리팩토링 시 함께 제거 검토.
-def _format_thread_buffers(thread_buffers: dict | None) -> str:
+def _format_thread_buffers(
+    thread_buffers: dict | None,
+    *,
+    thread_timestamps: list[str] | None = None,
+    channel_id: str | None = None,
+    resolver: DisplayNameResolver | None = None,
+    reply_limit: int = 20,
+) -> str:
     """thread_buffers를 사람이 읽기 좋은 텍스트로 변환합니다.
 
-    dict[str, list[dict]] 구조를 스레드별 대화 블록으로 포맷합니다.
-    빈 buffers이면 빈 문자열을 반환합니다.
+    dict[str, list[dict]] 구조를 스레드별 대화 블록으로 포맷합니다. 선택된
+    스레드는 최근 ``reply_limit``개 답글만 포함합니다. 빈 buffers 또는 선택된
+    답글이 없으면 빈 문자열을 반환합니다.
 
     예시 출력:
         [1774317667.361259]
@@ -1251,13 +1299,25 @@ def _format_thread_buffers(thread_buffers: dict | None) -> str:
     """
     if not thread_buffers:
         return ""
+    selected = list(thread_buffers) if thread_timestamps is None else thread_timestamps
     blocks = []
-    for tid, msgs in thread_buffers.items():
-        lines = [f"[{tid}]"]
+    for tid in selected:
+        msgs = thread_buffers.get(tid, [])[-reply_limit:]
+        if not msgs:
+            continue
+        root_prefix = f"[{channel_id}:{tid}]" if channel_id else f"[{tid}]"
+        lines = [f"{root_prefix} 스레드"]
         for m in msgs:
             user = m.get("user", "")
+            resolved_user = (
+                resolver.resolve(user) if resolver and user else user
+            ) or "unknown"
             text = m.get("text", "")
-            lines.append(f"  {user}: {text}")
+            if channel_id:
+                reply_prefix = f"[{channel_id}:{m.get('ts', '')}]"
+                lines.append(f"  {reply_prefix} <{resolved_user}>: {text}")
+            else:
+                lines.append(f"  {resolved_user}: {text}")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 

@@ -27,6 +27,7 @@ from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConf
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
 logger = logging.getLogger(__name__)
+PREP_MAX_TOKENS = 4096
 
 
 class ChannelObserverPlugin(Plugin):
@@ -319,9 +320,17 @@ class ChannelObserverPlugin(Plugin):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
+                max_tokens=PREP_MAX_TOKENS,
                 client_id="channel-observer",
             )
-            return result.content
+            content = result.content
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError(
+                    "prep LLM proxy returned empty content "
+                    f"(output_tokens={result.output_tokens}, "
+                    f"max_tokens={PREP_MAX_TOKENS})"
+                )
+            return content
 
         return llm_call
 
