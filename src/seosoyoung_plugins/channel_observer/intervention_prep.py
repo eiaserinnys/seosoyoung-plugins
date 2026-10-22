@@ -25,7 +25,6 @@ PREP_SYSTEM_PROMPT = """채널 개입 준비 데이터를 JSON 하나로 만든�
 출력은 설명이나 코드 펜스 없이 다음 키만 포함한 JSON object다.
 - threads: [{"ts": "원문 timestamp", "summary": "40자 이내 화자: 행위"}]
 - suggested_title: 핵심 화제 20자 이내. 이모지와 '개입' 접미사는 쓰지 않는다.
-- keywords: Atom BM25 검색용 구체 키워드 3~5개. 동의어·표기 변형을 포함한다.
 threads에는 입력의 모든 메시지를 빠짐없이 같은 순서로 넣는다.
 원문에 없는 사실을 추가하지 않는다."""
 
@@ -42,8 +41,6 @@ class InterventionPrep:
     slug: str
     threads_file: Path
     suggested_title: str
-    keywords: list[str]
-    context_item: dict[str, str]
 
 
 def default_prep_output_dir() -> Path | None:
@@ -103,21 +100,6 @@ def _normalize_threads(
     return threads
 
 
-def _normalize_keywords(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("keywords was not a list")
-    keywords = list(
-        dict.fromkeys(
-            " ".join(str(keyword).split()).strip()
-            for keyword in value
-            if " ".join(str(keyword).split()).strip()
-        )
-    )[:5]
-    if len(keywords) < 3:
-        raise ValueError("keywords had fewer than three entries")
-    return keywords
-
-
 def _write_threads_file(
     path: Path,
     *,
@@ -152,34 +134,13 @@ def _write_threads_file(
             temp_path.unlink()
 
 
-def _render_context_item(
-    slug: str,
-    threads_file: Path,
-    suggested_title: str,
-    keywords: list[str],
-) -> dict[str, str]:
-    keyword_json = json.dumps(keywords, ensure_ascii=False)
-    return {
-        "key": "intervene_prep",
-        "label": "개입 준비물",
-        "content": "\n".join(
-            [
-                "## 개입 준비물",
-                f"- slug: {slug}",
-                f"- threads_file: {threads_file}",
-                f"- suggested_title: {suggested_title}",
-                f"- keywords: {keyword_json}",
-            ]
-        ),
-    }
-
-
 async def build_intervention_prep(
     *,
     llm_call: LlmCall | None,
     channel_id: str,
     thread_context: str,
     output_dir: Path | None,
+    slug: str | None = None,
     message_timestamps: list[str] | None = None,
     now: datetime | None = None,
 ) -> InterventionPrep | None:
@@ -205,13 +166,13 @@ async def build_intervention_prep(
         parsed = _extract_object(raw)
         threads = _normalize_threads(parsed.get("threads"), message_timestamps)
         suggested_title = _normalize_title(parsed.get("suggested_title"))
-        keywords = _normalize_keywords(parsed.get("keywords"))
 
         timestamp = now or datetime.now(KST)
         if timestamp.tzinfo is None:
             timestamp = timestamp.replace(tzinfo=KST)
         timestamp = timestamp.astimezone(KST)
-        slug = timestamp.strftime("%Y%m%d-%H%M%S")
+        if not slug:
+            slug = timestamp.strftime("%Y%m%d-%H%M%S")
         safe_channel = "".join(
             char if char.isalnum() or char in "-_" else "_" for char in channel_id
         )
@@ -228,10 +189,6 @@ async def build_intervention_prep(
             slug=slug,
             threads_file=threads_file,
             suggested_title=suggested_title,
-            keywords=keywords,
-            context_item=_render_context_item(
-                slug, threads_file, suggested_title, keywords,
-            ),
         )
     except Exception as exc:
         logger.warning("intervene prep 실패 (%s): %s", channel_id, exc)

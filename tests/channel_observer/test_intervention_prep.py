@@ -30,7 +30,6 @@ async def test_build_prep_calls_llm_once_and_writes_contract_file(tmp_path):
                     {"ts": "1002.000001", "summary": "서하: 추론 비용을 질문"},
                 ],
                 "suggested_title": "GPU 품절과 추론 비용",
-                "keywords": ["GPU 품절", "추론 비용", "Astra 구독"],
             },
             ensure_ascii=False,
         )
@@ -42,6 +41,7 @@ async def test_build_prep_calls_llm_once_and_writes_contract_file(tmp_path):
         channel_id="C1",
         thread_context=thread_context,
         output_dir=tmp_path,
+        slug="20260913-132401",
         message_timestamps=["1001.000001", "1002.000001"],
         now=datetime(2026, 9, 13, 13, 24, 1, tzinfo=KST),
     )
@@ -50,11 +50,9 @@ async def test_build_prep_calls_llm_once_and_writes_contract_file(tmp_path):
     assert llm_call.await_count == 1
     assert prep.slug == "20260913-132401"
     assert prep.suggested_title == "🗯️ GPU 품절과 추론 비용 개입"
-    assert prep.keywords == ["GPU 품절", "추론 비용", "Astra 구독"]
     assert prep.threads_file == (tmp_path / "threads-C1-20260913-132401.json").resolve()
-    assert prep.context_item["key"] == "intervene_prep"
-    assert str(prep.threads_file) in prep.context_item["content"]
-    assert '["GPU 품절", "추론 비용", "Astra 구독"]' in prep.context_item["content"]
+    assert not hasattr(prep, "context_item")
+    assert "keywords" not in llm_call.await_args.args[0]
 
     payload = json.loads(prep.threads_file.read_text(encoding="utf-8"))
     assert payload == {
@@ -112,7 +110,6 @@ async def test_build_prep_missing_message_summary_is_fail_open(tmp_path):
             {
                 "threads": [{"ts": "1", "summary": "U1: 첫 메시지"}],
                 "suggested_title": "대화",
-                "keywords": ["첫째", "둘째", "대화"],
             },
             ensure_ascii=False,
         )
@@ -188,149 +185,6 @@ async def test_session_run_is_cancelled_with_naming_wrapper():
     with pytest.raises(asyncio.CancelledError):
         await wrapper
     assert run_cancelled.is_set()
-
-
-@pytest.mark.asyncio
-async def test_execute_injects_prep_and_knowledge_then_names_session(
-    mock_plugin_sdk, tmp_path, monkeypatch,
-):
-    from seosoyoung_plugins.channel_observer import pipeline
-
-    store = MagicMock()
-    store.get_digest.return_value = None
-    store.load_judged.return_value = []
-    store.append_judged = MagicMock()
-    messages = [
-        {"ts": "1100.0001", "user": "U1", "text": "GPU 품절"},
-        {"ts": "1100.0002", "user": "U2", "text": "추론 비용"},
-    ]
-    prep_llm = AsyncMock(
-        return_value=json.dumps(
-            {
-                "threads": [
-                    {"ts": "1100.0001", "summary": "U1: GPU 품절을 공유"},
-                    {"ts": "1100.0002", "summary": "U2: 추론 비용을 질문"},
-                ],
-                "suggested_title": "GPU와 추론 비용",
-                "keywords": ["GPU", "추론", "비용"],
-            },
-            ensure_ascii=False,
-        )
-    )
-    search_cards = AsyncMock(
-        return_value=[
-            {
-                "card_id": "card-1",
-                "title": "추론 비용 메모",
-                "snippet": "비용 비교",
-                "node_path": ["서소영의 서재", "발행 이력"],
-            }
-        ]
-    )
-    set_session_name = AsyncMock()
-    services = InterventionPrepServices(
-        output_dir=tmp_path,
-        search_cards=search_cards,
-        set_session_name=set_session_name,
-    )
-    mock_plugin_sdk["slack"].get_channel_history = AsyncMock(return_value=[])
-    monkeypatch.setattr(
-        pipeline,
-        "_fetch_recent_context_bundle",
-        AsyncMock(
-            return_value=(
-                "[C_TEST:1100.0001] <U1>: GPU 품절\n"
-                "[C_TEST:1100.0002] <U2>: 추론 비용",
-                ["1100.0001", "1100.0002"],
-            )
-        ),
-    )
-    mock_plugin_sdk["soulstream"].run = AsyncMock(
-        return_value=RunResult(
-            ok=True,
-            status=RunStatus.COMPLETED,
-            session_id="session-123",
-            utterances=["제가 비용 자료를 볼게요."],
-        )
-    )
-    monkeypatch.setattr(pipeline, "build_remiel_context_item", AsyncMock(return_value=None))
-
-    await pipeline._execute_intervene(
-        store=store,
-        channel_id="C_TEST",
-        action=InterventionAction(type="message", target="channel", content="reason"),
-        pending_messages=messages,
-        llm_call=prep_llm,
-        prep_services=services,
-    )
-
-    context = mock_plugin_sdk["soulstream"].run.call_args.kwargs["context"]
-    assert [item["key"] for item in context] == [
-        "thread_context",
-        "intervene_prep",
-    ]
-    set_session_name.assert_awaited_once_with(
-        "session-123", "🗯️ GPU와 추론 비용 개입"
-    )
-    assert prep_llm.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_execute_atom_and_session_name_failures_do_not_block_intervention(
-    mock_plugin_sdk, tmp_path, monkeypatch,
-):
-    from seosoyoung_plugins.channel_observer import pipeline
-
-    store = MagicMock()
-    store.get_digest.return_value = None
-    store.load_judged.return_value = []
-    store.append_judged = MagicMock()
-    prep_llm = AsyncMock(
-        return_value=json.dumps(
-            {
-                "threads": [{"ts": "1", "summary": "U1: 인사"}],
-                "suggested_title": "인사",
-                "keywords": ["인사", "채널", "대화"],
-            },
-            ensure_ascii=False,
-        )
-    )
-    services = InterventionPrepServices(
-        output_dir=tmp_path,
-        search_cards=AsyncMock(side_effect=RuntimeError("atom unavailable")),
-        set_session_name=AsyncMock(side_effect=RuntimeError("mcp unavailable")),
-    )
-    mock_plugin_sdk["slack"].get_channel_history = AsyncMock(return_value=[])
-    monkeypatch.setattr(
-        pipeline,
-        "_fetch_recent_context_bundle",
-        AsyncMock(return_value=("[C_TEST:1] <U1>: hello", ["1"])),
-    )
-    mock_plugin_sdk["soulstream"].run = AsyncMock(
-        return_value=RunResult(
-            ok=True,
-            status=RunStatus.COMPLETED,
-            session_id="session-123",
-            utterances=["기존 개입은 계속됩니다."],
-        )
-    )
-
-    await pipeline._execute_intervene(
-        store=store,
-        channel_id="C_TEST",
-        action=InterventionAction(type="message", target="channel", content="reason"),
-        pending_messages=[{"ts": "1", "user": "U1", "text": "hello"}],
-        llm_call=prep_llm,
-        prep_services=services,
-    )
-
-    context = mock_plugin_sdk["soulstream"].run.call_args.kwargs["context"]
-    assert [item["key"] for item in context] == [
-        "thread_context",
-        "intervene_prep",
-    ]
-    services.set_session_name.assert_awaited_once()
-    mock_plugin_sdk["slack"].send_message.assert_awaited()
 
 
 @pytest.mark.asyncio
