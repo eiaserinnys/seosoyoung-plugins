@@ -9,7 +9,7 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 
 이 모듈은 기존 테스트가 내부 정책 함수와 SDK patch surface를 직접 참조하는 호환
 facade라 500줄을 초과한다. 이번 변경의 신규 준비 로직과 외부 wire 로직은 각각
-intervention_prep.py, knowledge_context.py, mcp_http.py에 두고 여기에는 orchestration만 둔다.
+intervention_prep.py, reference_context.py, mcp_http.py에 두고 여기에는 orchestration만 둔다.
 """
 
 import asyncio
@@ -42,8 +42,8 @@ from seosoyoung_plugins.channel_observer.intervention_prep import (
     build_intervention_prep,
     run_and_name_session,
 )
-from seosoyoung_plugins.channel_observer.knowledge_context import (
-    build_knowledge_context_item,
+from seosoyoung_plugins.channel_observer.reference_context import (
+    build_reference_context_item,
 )
 from seosoyoung_plugins.channel_observer.observer import (
     ChannelObserver,
@@ -1039,13 +1039,13 @@ async def _execute_intervene(
     if prep:
         context_items.append(prep.context_item)
 
-        knowledge_context_item = await build_knowledge_context_item(
-            prep.keywords,
-            services.search_cards,
-            timeout=2.0,
-        )
-        if knowledge_context_item:
-            context_items.append(knowledge_context_item)
+    reference_context_item = await build_reference_context_item(
+        trigger_message.get("text") if trigger_message else None,
+        getattr(services, "reference", None),
+        channel_id=channel_id,
+    )
+    if reference_context_item:
+        context_items.append(reference_context_item)
 
     remiel_context_item = await build_remiel_context_item(
         remiel_config,
