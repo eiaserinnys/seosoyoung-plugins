@@ -5,6 +5,7 @@ import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from seosoyoung_plugins.channel_observer import reference_context
@@ -262,7 +263,8 @@ async def test_one_side_failure_renders_the_other(monkeypatch, caplog):
     assert "### atom-nl" not in item["content"]
     assert "### 지난 작업 세션" in item["content"]
     assert "- GPU 조사 — 엠버 앤 블레이드, 2026-10-20 — GPU 공급 일정 확인" in item["content"]
-    assert "atom unavailable" in caplog.text
+    assert "reference context atom 검색 실패 (C_TEST): RuntimeError" in caplog.text
+    assert "atom unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -415,15 +417,24 @@ def test_missing_atom_config_disables_atom_and_warns_without_key(
     assert "partial-secret" not in caplog.text
 
 
+LEAKED_KEY = "sk-leak-9f3c"
+
+
+@pytest.mark.parametrize(
+    ("searcher", "source"),
+    [
+        ("_search_atom_cards", "atom"),
+        ("_search_session_results", "session"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_search_failure_logs_do_not_contain_api_keys(monkeypatch, caplog):
+async def test_search_failure_logs_exception_type_without_message(
+    monkeypatch, caplog, searcher, source,
+):
     monkeypatch.setattr(
         reference_context,
-        "_search_atom_cards",
-        AsyncMock(side_effect=RuntimeError("connection refused")),
-    )
-    monkeypatch.setattr(
-        reference_context, "_search_session_results", AsyncMock(return_value=[])
+        searcher,
+        AsyncMock(side_effect=RuntimeError(f"bad header {LEAKED_KEY}")),
     )
 
     with caplog.at_level(logging.WARNING):
@@ -431,9 +442,57 @@ async def test_search_failure_logs_do_not_contain_api_keys(monkeypatch, caplog):
             "GPU 품절", make_reference(), channel_id="C_TEST",
         )
 
-    assert "connection refused" in caplog.text
+    assert f"reference context {source} 검색 실패 (C_TEST): RuntimeError" in caplog.text
+    assert LEAKED_KEY not in caplog.text
     assert "atom-secret" not in caplog.text
     assert "orch-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_search_failure_logs_status_code_for_http_status_error(
+    monkeypatch, caplog,
+):
+    request = httpx.Request("GET", "https://orch.test/cogito/search")
+    error = httpx.HTTPStatusError(
+        f"401 Unauthorized {LEAKED_KEY}",
+        request=request,
+        response=httpx.Response(401, request=request),
+    )
+    monkeypatch.setattr(
+        reference_context, "_search_session_results", AsyncMock(side_effect=error),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await build_reference_context_item(
+            "GPU 품절", make_reference(), channel_id="C_TEST",
+        )
+
+    assert "reference context session 검색 실패 (C_TEST): HTTPStatusError 401" in caplog.text
+    assert LEAKED_KEY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_build_failure_logs_exception_type_without_message(monkeypatch, caplog):
+    monkeypatch.setattr(
+        reference_context, "_search_atom_cards", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        reference_context, "_search_session_results", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        reference_context,
+        "_render_context_item",
+        MagicMock(side_effect=ValueError(f"render failed {LEAKED_KEY}")),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await build_reference_context_item(
+            "GPU 품절", make_reference(), channel_id="C_TEST",
+        )
+
+    assert result is None
+    assert "reference context 생성 실패 (C_TEST): ValueError" in caplog.text
+    assert LEAKED_KEY not in caplog.text
 
 
 @pytest.mark.asyncio

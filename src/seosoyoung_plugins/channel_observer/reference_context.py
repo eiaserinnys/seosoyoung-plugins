@@ -174,6 +174,15 @@ def make_reference_search(config: dict[str, Any]) -> ReferenceConfig:
     )
 
 
+def _exception_label(exc: BaseException) -> str:
+    """Exception type without its message, which may embed credentials."""
+
+    label = type(exc).__name__
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{label} {exc.response.status_code}"
+    return label
+
+
 def _compact(value: Any, limit: int) -> str:
     text = unescape(HTML_TAG.sub("", str(value or "")))
     text = " ".join(text.split())
@@ -373,7 +382,10 @@ async def _resolve_searches(
             value = task.result()
         except Exception as exc:
             logger.warning(
-                "reference context %s 검색 실패 (%s): %s", name, channel_id, exc,
+                "reference context %s 검색 실패 (%s): %s",
+                name,
+                channel_id,
+                _exception_label(exc),
             )
             continue
         results[name] = value if isinstance(value, list) else []
@@ -427,5 +439,9 @@ async def build_reference_context_item(
             text, reference, channel_id=channel_id, timeout=timeout,
         )
     except Exception as exc:
-        logger.warning("reference context 생성 실패 (%s): %s", channel_id, exc)
+        logger.warning(
+            "reference context 생성 실패 (%s): %s",
+            channel_id,
+            _exception_label(exc),
+        )
         return None
