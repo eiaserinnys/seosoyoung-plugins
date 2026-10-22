@@ -11,13 +11,21 @@ import pytest
 from seosoyoung.plugin_sdk.soulstream import RunResult, RunStatus
 from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 from seosoyoung_plugins.channel_observer.intervention_prep import (
-    InterventionPrepServices,
+    InterventionPrep,
     build_intervention_prep,
     run_and_name_session,
 )
 
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+async def _resolved_prep(title: str) -> InterventionPrep:
+    return InterventionPrep(
+        slug="slug",
+        threads_file=Path("/tmp/threads.json"),
+        suggested_title=title,
+    )
 
 
 @pytest.mark.asyncio
@@ -146,10 +154,17 @@ async def test_session_is_named_before_long_running_agent_finishes():
     async def set_name(_session_id, _name):
         named_before_finish.append(not run_finished)
 
+    async def prep():
+        return InterventionPrep(
+            slug="slug",
+            threads_file=Path("/tmp/threads.json"),
+            suggested_title="🗯️ 조기 제목 개입",
+        )
+
     result = await run_and_name_session(
         slow_run(),
         thread_ts="1000.1",
-        suggested_title="🗯️ 조기 제목 개입",
+        prep_task=asyncio.create_task(prep()),
         get_session_id=getter,
         set_session_name=set_name,
         poll_interval=0.01,
@@ -173,7 +188,9 @@ async def test_session_run_is_cancelled_with_naming_wrapper():
         run_and_name_session(
             slow_run(),
             thread_ts="1000.1",
-            suggested_title="🗯️ 취소 경로 개입",
+            prep_task=asyncio.create_task(
+                _resolved_prep("🗯️ 취소 경로 개입")
+            ),
             get_session_id=lambda _thread_ts: None,
             set_session_name=AsyncMock(),
             poll_interval=0.01,

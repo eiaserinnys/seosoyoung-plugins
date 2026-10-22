@@ -13,7 +13,8 @@ import tempfile
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from seosoyoung_plugins.channel_observer.mcp_http import SearchCards, SetSessionName
+from seosoyoung_plugins.channel_observer.intervene_memory import InterveneMemory
+from seosoyoung_plugins.channel_observer.mcp_http import SetSessionName
 
 
 logger = logging.getLogger(__name__)
@@ -32,8 +33,8 @@ threads에는 입력의 모든 메시지를 빠짐없이 같은 순서로 넣는
 @dataclass(frozen=True)
 class InterventionPrepServices:
     output_dir: Path | None = None
-    search_cards: SearchCards | None = None
     set_session_name: SetSessionName | None = None
+    memory: InterveneMemory | None = None
 
 
 @dataclass(frozen=True)
@@ -199,15 +200,20 @@ async def run_and_name_session(
     run_awaitable: Awaitable[Any],
     *,
     thread_ts: str,
-    suggested_title: str | None,
+    prep_task: Awaitable[InterventionPrep | None] | None,
     get_session_id: Callable[[str], str | None],
     set_session_name: SetSessionName | None,
     poll_interval: float = 0.05,
 ) -> Any:
-    """Name the session as soon as the backend registers its SSE session ID."""
+    """Name the session as soon as the backend registers its SSE session ID.
+
+    ``prep_task`` is started by the caller and may still be running. The name
+    is applied only after it resolves, so prep never extends the critical path
+    of the run itself.
+    """
     run_task = asyncio.create_task(run_awaitable)
     try:
-        if not suggested_title or set_session_name is None:
+        if prep_task is None or set_session_name is None:
             return await run_task
 
         session_id: str | None = None
@@ -233,10 +239,12 @@ async def run_and_name_session(
             session_id = getattr(result, "session_id", None)
 
         if session_id:
-            try:
-                await set_session_name(session_id, suggested_title)
-            except Exception as exc:
-                logger.warning("개입 세션 이름 설정 실패 (%s): %s", session_id, exc)
+            prep = await prep_task
+            if prep is not None:
+                try:
+                    await set_session_name(session_id, prep.suggested_title)
+                except Exception as exc:
+                    logger.warning("개입 세션 이름 설정 실패 (%s): %s", session_id, exc)
         return result if result is not None else await run_task
     except asyncio.CancelledError:
         run_task.cancel()

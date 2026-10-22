@@ -15,6 +15,7 @@ from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung_plugins.channel_observer import pipeline_lock
+from seosoyoung_plugins.channel_observer.intervene_memory import InterveneMemory
 from seosoyoung_plugins.channel_observer.intervention_prep import (
     default_prep_output_dir,
 )
@@ -117,6 +118,7 @@ class ChannelObserverPlugin(Plugin):
             set_session_name=make_session_name_setter(
                 soulstream_url, soulstream_token,
             ),
+            memory=InterveneMemory.from_config(config),
         )
 
         logger.info(
