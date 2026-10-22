@@ -1,9 +1,13 @@
 """Trigger-sentence reference lookup for channel interventions.
 
-The sentence that triggered an intervention is used as-is to search two
-sources: the team atom instance (atom-nl) and prior Soulstream sessions on the
-company nodes. Both searches run concurrently inside one deadline and the
-result is rendered as a single reference context item.
+The sentence that triggered an intervention is used as-is to search three
+sources: the personal atom instance, the team atom instance (atom-nl), and
+prior Soulstream sessions on the company nodes. All searches run concurrently
+inside one deadline and the results are rendered as a single context item.
+
+The three-source resolution, filtering, and rendering live in this one module
+because the delegation scope keeps the change to this file, so it exceeds the
+500-line guideline.
 """
 
 from __future__ import annotations
@@ -32,14 +36,19 @@ from seosoyoung_plugins.channel_observer.mcp_http import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ATOM_URL = "https://atom.eiaserinnys.me"
+DEFAULT_ATOM_KEY_ENV = "ATOM_AGENT_KEY"
+DEFAULT_ATOM_ROOTS = ("지식", "레퍼런스", "서소영의 서재")
 DEFAULT_SESSION_NODES = ("eias-linegames", "eias-linegames-wsl")
 DEFAULT_SESSION_MIN_RELEVANCE = 0.3
 REFERENCE_TIMEOUT = 4.0
-ATOM_RESULT_LIMIT = 8
+PERSONAL_ATOM_RESULT_LIMIT = 30
+ATOM_NL_RESULT_LIMIT = 8
 REFERENCE_RESULT_LIMIT = 3
 QUERY_LIMIT = 200
 MIN_QUERY_LENGTH = 2
-EXCLUDED_ATOM_PATH_PARTS = ("채널 개입 이력", "슬랙 대화")
+EXCLUDED_ATOM_NL_PATH_PARTS = ("채널 개입 이력", "슬랙 대화")
+EXCLUDED_ATOM_NL_TITLE_PREFIXES = ("📚", "🗒️")
 
 SLACK_TOKEN = re.compile(r"<[^>]*>")
 EMOJI_TOKEN = re.compile(r":[^\s:]+:")
@@ -50,13 +59,18 @@ HTML_TAG = re.compile(r"<[^>]+>")
 class ReferenceConfig:
     """Resolved reference search configuration.
 
-    Empty atom fields or empty orchestrator fields disable that source. The
-    values are resolved once when the plugin loads; malformed or missing
+    Empty source fields or empty orchestrator fields disable that source. The
+    atom fields are the team atom-nl instance; the personal atom keeps its own
+    pair. Values are resolved once when the plugin loads; malformed or missing
     configuration is reported there instead of on every intervention.
     """
 
+    personal_atom_base_url: str = ""
+    personal_atom_api_key: str = ""
+    atom_roots: tuple[str, ...] = DEFAULT_ATOM_ROOTS
     atom_base_url: str = ""
     atom_api_key: str = ""
+    atom_nl_enabled: bool = True
     orch_base_url: str = ""
     orch_token: str = ""
     session_nodes: tuple[str, ...] = DEFAULT_SESSION_NODES
@@ -64,8 +78,12 @@ class ReferenceConfig:
     folder_id: str = ""
 
     @property
-    def atom_enabled(self) -> bool:
-        return bool(self.atom_base_url and self.atom_api_key)
+    def personal_atom_enabled(self) -> bool:
+        return bool(self.personal_atom_base_url and self.personal_atom_api_key)
+
+    @property
+    def atom_nl_active(self) -> bool:
+        return self.atom_nl_enabled and bool(self.atom_base_url and self.atom_api_key)
 
     @property
     def session_enabled(self) -> bool:
@@ -93,7 +111,7 @@ def normalize_query(value: Any) -> str:
     return text[:QUERY_LIMIT]
 
 
-def _resolve_atom_config() -> tuple[str, str] | None:
+def _resolve_atom_nl_config() -> tuple[str, str] | None:
     env_url = os.environ.get("ATOM_NL_BASE_URL") or os.environ.get(
         "ATOM_NL_SERVER_URL"
     )
@@ -143,16 +161,48 @@ def _session_min_relevance(config: dict[str, Any]) -> float:
         return DEFAULT_SESSION_MIN_RELEVANCE
 
 
-def make_reference_search(config: dict[str, Any]) -> ReferenceConfig:
-    """Resolve atom and orchestrator settings once at plugin load."""
+def _atom_roots(config: dict[str, Any]) -> tuple[str, ...]:
+    raw = config.get("reference_atom_roots", DEFAULT_ATOM_ROOTS)
+    if isinstance(raw, (list, tuple)):
+        roots = tuple(str(item).strip() for item in raw if str(item).strip())
+        if roots:
+            return roots
+    return DEFAULT_ATOM_ROOTS
 
-    atom = _resolve_atom_config()
-    atom_base_url, atom_api_key = atom if atom else ("", "")
-    if not atom:
+
+def _atom_nl_toggle(config: dict[str, Any]) -> bool:
+    value = config.get("reference_atom_nl", True)
+    return value if isinstance(value, bool) else True
+
+
+def make_reference_search(config: dict[str, Any]) -> ReferenceConfig:
+    """Resolve atom, atom-nl, and orchestrator settings at plugin load."""
+
+    personal_atom_base_url = str(
+        config.get("reference_atom_url", DEFAULT_ATOM_URL) or ""
+    ).strip().rstrip("/")
+    key_env = str(
+        config.get("reference_atom_key_env", DEFAULT_ATOM_KEY_ENV) or ""
+    ).strip()
+    personal_atom_api_key = os.environ.get(key_env, "").strip() if key_env else ""
+    if not (personal_atom_base_url and personal_atom_api_key):
+        personal_atom_base_url, personal_atom_api_key = "", ""
         logger.warning(
-            "reference context: atom 검색 비활성 — ATOM_NL_BASE_URL/"
-            "ATOM_NL_API_KEY 또는 SCRATCH_WORKSPACE_DIR/.mcp.json의 atom-nl 설정 없음"
+            "reference context: 개인 atom 검색 비활성 — reference_atom_url/"
+            "reference_atom_key_env 설정 또는 해당 환경변수 없음"
         )
+
+    atom_nl_enabled = _atom_nl_toggle(config)
+    atom_base_url, atom_api_key = "", ""
+    if atom_nl_enabled:
+        atom_nl = _resolve_atom_nl_config()
+        if atom_nl:
+            atom_base_url, atom_api_key = atom_nl
+        else:
+            logger.warning(
+                "reference context: atom-nl 검색 비활성 — ATOM_NL_BASE_URL/"
+                "ATOM_NL_API_KEY 또는 SCRATCH_WORKSPACE_DIR/.mcp.json의 atom-nl 설정 없음"
+            )
 
     orch_base_url = os.environ.get("SOULSTREAM_ORCH_URL", "").strip().rstrip("/")
     orch_token = os.environ.get("SOULSTREAM_ORCH_TOKEN", "").strip()
@@ -164,8 +214,12 @@ def make_reference_search(config: dict[str, Any]) -> ReferenceConfig:
         )
 
     return ReferenceConfig(
+        personal_atom_base_url=personal_atom_base_url,
+        personal_atom_api_key=personal_atom_api_key,
+        atom_roots=_atom_roots(config),
         atom_base_url=atom_base_url,
         atom_api_key=atom_api_key,
+        atom_nl_enabled=atom_nl_enabled,
         orch_base_url=orch_base_url,
         orch_token=orch_token,
         session_nodes=_session_nodes(config),
@@ -198,19 +252,41 @@ def _node_path(card: dict[str, Any]) -> list[str]:
     return [str(part).strip() for part in raw_path if str(part).strip()]
 
 
-def _is_excluded_atom_card(card: dict[str, Any]) -> bool:
-    return any(
-        excluded in part
-        for part in _node_path(card)
-        for excluded in EXCLUDED_ATOM_PATH_PARTS
-    )
-
-
-def _filter_atom_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _filter_atom_cards(
+    cards: list[dict[str, Any]], roots: tuple[str, ...],
+) -> list[dict[str, Any]]:
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
     for card in cards:
-        if not isinstance(card, dict) or _is_excluded_atom_card(card):
+        if not isinstance(card, dict):
+            continue
+        path = _node_path(card)
+        if not path or path[0] not in roots:
+            continue
+        identity = str(card.get("card_id") or card.get("title") or "")
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(card)
+    return unique[:REFERENCE_RESULT_LIMIT]
+
+
+def _is_excluded_atom_nl_card(card: dict[str, Any]) -> bool:
+    if any(
+        excluded in part
+        for part in _node_path(card)
+        for excluded in EXCLUDED_ATOM_NL_PATH_PARTS
+    ):
+        return True
+    title = str(card.get("title") or "").strip()
+    return title.startswith(EXCLUDED_ATOM_NL_TITLE_PREFIXES)
+
+
+def _filter_atom_nl_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for card in cards:
+        if not isinstance(card, dict) or _is_excluded_atom_nl_card(card):
             continue
         identity = str(card.get("card_id") or card.get("title") or "")
         if identity in seen:
@@ -242,26 +318,58 @@ def _filter_session_results(
     return [result for _, result in kept[:REFERENCE_RESULT_LIMIT]]
 
 
-async def _search_atom_cards(
-    reference: ReferenceConfig,
+async def _search_cards(
+    base_url: str,
+    api_key: str,
     query: str,
+    limit: int,
     *,
     client: Any | None = None,
 ) -> list[dict[str, Any]]:
     config = McpHttpConfig(
-        base_url=reference.atom_base_url,
-        auth_headers={"x-api-key": reference.atom_api_key},
+        base_url=base_url,
+        auth_headers={"x-api-key": api_key},
         timeout=REFERENCE_TIMEOUT,
     )
     result = await call_stateless_tool(
         config,
         "search_cards",
-        {"query": query, "limit": ATOM_RESULT_LIMIT},
+        {"query": query, "limit": limit},
         client=client,
     )
     if not isinstance(result, list):
         return []
     return [item for item in result if isinstance(item, dict)]
+
+
+async def _search_personal_atom_cards(
+    reference: ReferenceConfig,
+    query: str,
+    *,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    return await _search_cards(
+        reference.personal_atom_base_url,
+        reference.personal_atom_api_key,
+        query,
+        PERSONAL_ATOM_RESULT_LIMIT,
+        client=client,
+    )
+
+
+async def _search_atom_nl_cards(
+    reference: ReferenceConfig,
+    query: str,
+    *,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    return await _search_cards(
+        reference.atom_base_url,
+        reference.atom_api_key,
+        query,
+        ATOM_NL_RESULT_LIMIT,
+        client=client,
+    )
 
 
 async def _search_session_results(
@@ -320,13 +428,18 @@ def _render_session(result: dict[str, Any]) -> str:
 def _render_context_item(
     query: str,
     atom_cards: list[dict[str, Any]],
+    atom_nl_cards: list[dict[str, Any]],
     sessions: list[dict[str, Any]],
 ) -> dict[str, str] | None:
-    if not atom_cards and not sessions:
+    if not atom_cards and not atom_nl_cards and not sessions:
         return None
     lines = ["## 참고 자료 (개입을 일으킨 문장으로 찾은 것)", f"검색어: {query}"]
     if atom_cards:
-        lines.extend(["### atom-nl", *(_render_atom_card(card) for card in atom_cards)])
+        lines.extend(["### atom", *(_render_atom_card(card) for card in atom_cards)])
+    if atom_nl_cards:
+        lines.extend(
+            ["### atom-nl (팀)", *(_render_atom_card(card) for card in atom_nl_cards)]
+        )
     if sessions:
         lines.extend(
             ["### 지난 작업 세션", *(_render_session(result) for result in sessions)]
@@ -347,9 +460,13 @@ async def _resolve_searches(
 ) -> dict[str, list[dict[str, Any]]]:
     tasks: dict[str, asyncio.Task] = {}
     try:
-        if reference.atom_enabled:
+        if reference.personal_atom_enabled:
             tasks["atom"] = asyncio.create_task(
-                _search_atom_cards(reference, query)
+                _search_personal_atom_cards(reference, query)
+            )
+        if reference.atom_nl_active:
+            tasks["atom-nl"] = asyncio.create_task(
+                _search_atom_nl_cards(reference, query)
             )
         if reference.session_enabled:
             tasks["session"] = asyncio.create_task(
@@ -410,19 +527,22 @@ async def _build_reference_context_item(
     if not results:
         return None
 
-    atom_cards = _filter_atom_cards(results.get("atom", []))
+    atom_cards = _filter_atom_cards(results.get("atom", []), reference.atom_roots)
+    atom_nl_cards = _filter_atom_nl_cards(results.get("atom-nl", []))
     sessions = _filter_session_results(reference, results.get("session", []))
     elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.info(
-        "reference context (%s): atom %d/%d, sessions %d/%d, %dms",
+        "reference context (%s): atom %d/%d, atom-nl %d/%d, sessions %d/%d, %dms",
         channel_id,
         len(atom_cards),
         len(results.get("atom", [])),
+        len(atom_nl_cards),
+        len(results.get("atom-nl", [])),
         len(sessions),
         len(results.get("session", [])),
         elapsed_ms,
     )
-    return _render_context_item(query, atom_cards, sessions)
+    return _render_context_item(query, atom_cards, atom_nl_cards, sessions)
 
 
 async def build_reference_context_item(
@@ -432,7 +552,7 @@ async def build_reference_context_item(
     channel_id: str = "",
     timeout: float = REFERENCE_TIMEOUT,
 ) -> dict[str, str] | None:
-    """Fail-open boundary around both reference searches and rendering."""
+    """Fail-open boundary around all reference searches and rendering."""
 
     try:
         return await _build_reference_context_item(
