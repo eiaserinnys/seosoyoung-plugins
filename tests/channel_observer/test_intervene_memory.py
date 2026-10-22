@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 import pytest
 
@@ -285,6 +286,57 @@ async def test_archive_threads_passes_channel_and_file(monkeypatch, scripts_dir)
     assert args[2:] == (
         "--channel", "C123",
         "--threads-file", str(scripts_dir / "threads.json"),
+    )
+
+
+def test_drain_background_waits_current_loop_and_ignores_other_loops():
+    finished = asyncio.Event()
+
+    async def work():
+        await asyncio.sleep(0.05)
+        finished.set()
+
+    loop = asyncio.new_event_loop()
+    other_loop = asyncio.new_event_loop()
+    other_task = other_loop.create_task(asyncio.sleep(10))
+    try:
+        async def scenario():
+            intervene_memory._background_tasks.add(other_task)
+            intervene_memory.spawn_background(work())
+            started = time.monotonic()
+            await intervene_memory.drain_background(timeout=0.5)
+            return time.monotonic() - started
+
+        elapsed = loop.run_until_complete(scenario())
+
+        assert finished.is_set()
+        assert other_task.done() is False
+        assert elapsed < 1.0
+    finally:
+        other_task.cancel()
+        other_loop.run_until_complete(
+            asyncio.gather(other_task, return_exceptions=True)
+        )
+        intervene_memory._background_tasks.discard(other_task)
+        other_loop.close()
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_drain_background_cancels_remaining_on_timeout(caplog):
+    async def work():
+        await asyncio.sleep(5)
+
+    task = intervene_memory.spawn_background(work())
+
+    with caplog.at_level(logging.WARNING):
+        await intervene_memory.drain_background(timeout=0.01)
+        await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert any(
+        "background drain timeout" in rec.message and "1 remaining" in rec.message
+        for rec in caplog.records
     )
 
 
