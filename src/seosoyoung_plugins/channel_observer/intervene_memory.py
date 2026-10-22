@@ -65,6 +65,32 @@ def spawn_background(coro: Any) -> asyncio.Task:
     return task
 
 
+async def drain_background(timeout: float = 120.0) -> None:
+    """현재 루프에 속한 백그라운드 작업이 끝날 때까지 기다린다.
+
+    개입 파이프라인은 채널마다 새 이벤트 루프를 만들고 ``loop.close()``로
+    끝낸다. 그 전에 기록·보관·늦은 이름 붙이기를 기다리지 않으면 task가
+    루프와 함께 사라진다. 다른 스레드의 루프에 속한 task는 건드리지 않는다.
+    """
+    loop = asyncio.get_running_loop()
+    tasks = [
+        task
+        for task in _background_tasks
+        if not task.done() and task.get_loop() is loop
+    ]
+    if not tasks:
+        return
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        logger.warning(
+            "intervene memory background drain timeout (%ss): %d remaining",
+            timeout,
+            len(pending),
+        )
+
+
 def _first_tag(text: str, tag: str) -> str | None:
     match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
     if match is None:

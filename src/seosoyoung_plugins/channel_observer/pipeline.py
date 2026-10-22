@@ -39,6 +39,7 @@ from seosoyoung_plugins.channel_observer.intervention import (
     send_multi_judge_debug_log,
 )
 from seosoyoung_plugins.channel_observer.intervene_memory import (
+    drain_background,
     parse_record_tags,
     render_channel_memory_item,
     render_member_facts_item,
@@ -1274,6 +1275,8 @@ async def _execute_intervene(
             prep = None
         if prep is not None:
             spawn_background(memory.archive_threads(channel_id, prep.threads_file))
+
+    await drain_background()
 
 
 async def _fetch_recent_context(

@@ -313,3 +313,68 @@ async def test_no_record_when_send_fails_but_archive_runs(
 
     assert memory.record_calls == []
     assert memory.archive_calls == [("C_TEST", prep.threads_file)]
+
+
+class SlowDrainMemory:
+    """운영처럼 루프가 닫히기 전에 반드시 끝나야 하는 기록·보관을 흉내낸다."""
+
+    def __init__(self) -> None:
+        self.recorded = False
+        self.archived = False
+
+    async def load_channel_memory(self, channel_id: str):
+        return {"previousSummary": "", "needsCompression": False}
+
+    async def load_member_facts(self, channel_id: str, slack_ids: list[str]):
+        return None
+
+    async def record_utterance(self, **kwargs):
+        await asyncio.sleep(0.05)
+        self.recorded = True
+        return True
+
+    async def archive_threads(self, channel_id: str, threads_file: Path):
+        await asyncio.sleep(0.05)
+        self.archived = True
+        return True
+
+
+def test_new_event_loop_drains_record_and_archive_before_close(
+    mock_plugin_sdk, monkeypatch, tmp_path,
+):
+    from seosoyoung_plugins.channel_observer import pipeline
+
+    memory = SlowDrainMemory()
+    monkeypatch.setattr(
+        pipeline, "build_intervention_prep", AsyncMock(return_value=_prep())
+    )
+    monkeypatch.setattr(
+        pipeline, "build_remiel_context_item", AsyncMock(return_value=None)
+    )
+    _patch_context(monkeypatch, pipeline)
+    mock_plugin_sdk["soulstream"].run = AsyncMock(return_value=_run_result(["본문"]))
+    mock_plugin_sdk["slack"].send_message = AsyncMock(
+        return_value=SendMessageResult(ok=True, ts="999.001", channel="C_TEST")
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            pipeline._execute_intervene(
+                store=_store(),
+                channel_id="C_TEST",
+                action=InterventionAction(
+                    type="message", target="channel", content="r",
+                ),
+                pending_messages=[{"ts": "1", "user": "U1", "text": "hi"}],
+                llm_call=AsyncMock(return_value="{}"),
+                prep_services=InterventionPrepServices(
+                    output_dir=tmp_path, memory=memory,
+                ),
+            )
+        )
+    finally:
+        loop.close()
+
+    assert memory.recorded is True
+    assert memory.archived is True
