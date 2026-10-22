@@ -11,6 +11,7 @@ import pytest
 from seosoyoung_plugins.channel_observer import reference_context
 from seosoyoung_plugins.channel_observer.intervention import InterventionAction
 from seosoyoung_plugins.channel_observer.reference_context import (
+    DEFAULT_ATOM_ROOTS,
     ReferenceConfig,
     ReferenceContextServices,
     build_reference_context_item,
@@ -21,8 +22,12 @@ from seosoyoung_plugins.channel_observer.reference_context import (
 
 def make_reference(**overrides):
     values = {
-        "atom_base_url": "https://atom.test",
-        "atom_api_key": "atom-secret",
+        "personal_atom_base_url": "https://personal-atom.test",
+        "personal_atom_api_key": "personal-secret",
+        "atom_roots": DEFAULT_ATOM_ROOTS,
+        "atom_base_url": "https://atom-nl.test",
+        "atom_api_key": "atom-nl-secret",
+        "atom_nl_enabled": True,
         "orch_base_url": "https://orch.test",
         "orch_token": "orch-secret",
         "session_nodes": ("eias-linegames", "eias-linegames-wsl"),
@@ -77,6 +82,18 @@ def tool_response(value):
     }
 
 
+def clear_source_env(monkeypatch):
+    for name in (
+        "ATOM_AGENT_KEY",
+        "ATOM_NL_BASE_URL",
+        "ATOM_NL_SERVER_URL",
+        "ATOM_NL_API_KEY",
+        "SOULSTREAM_ORCH_URL",
+        "SOULSTREAM_ORCH_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_normalize_query_removes_slack_tokens_emoji_and_whitespace():
     query = normalize_query(
         "<@U123> <#C1|잡담> :wave: <https://example.test/a?b=1|링크>  GPU   추론"
@@ -90,10 +107,12 @@ def test_normalize_query_truncates_to_200_characters():
 
 
 @pytest.mark.asyncio
-async def test_short_query_skips_both_searches(monkeypatch):
+async def test_short_query_skips_all_searches(monkeypatch):
     atom = AsyncMock(return_value=[])
+    atom_nl = AsyncMock(return_value=[])
     session = AsyncMock(return_value=[])
-    monkeypatch.setattr(reference_context, "_search_atom_cards", atom)
+    monkeypatch.setattr(reference_context, "_search_personal_atom_cards", atom)
+    monkeypatch.setattr(reference_context, "_search_atom_nl_cards", atom_nl)
     monkeypatch.setattr(reference_context, "_search_session_results", session)
 
     item = await build_reference_context_item(
@@ -102,52 +121,122 @@ async def test_short_query_skips_both_searches(monkeypatch):
 
     assert item is None
     atom.assert_not_awaited()
+    atom_nl.assert_not_awaited()
     session.assert_not_awaited()
 
 
-def test_atom_filter_excludes_history_paths_dedupes_and_limits():
+def test_personal_atom_filter_keeps_allowed_roots_only():
     cards = [
         {
-            "card_id": "a1",
+            "card_id": "p1",
+            "title": "GPU 지식",
+            "node_path": ["지식", "GPU"],
+        },
+        {
+            "card_id": "p2",
+            "title": "사용자 프로필",
+            "node_path": ["사용자", "프로필"],
+        },
+        {
+            "card_id": "p3",
+            "title": "에이전트 규칙",
+            "node_path": ["에이전트", "규칙"],
+        },
+        {
+            "card_id": "p4",
+            "title": "루트 없음",
+            "node_path": [],
+        },
+        {
+            "card_id": "p1",
+            "title": "중복",
+            "node_path": ["지식", "중복"],
+        },
+        {
+            "card_id": "p5",
+            "title": "서재",
+            "node_path": ["서소영의 서재", "메모"],
+        },
+        {
+            "card_id": "p6",
+            "title": "레퍼런스",
+            "node_path": ["레퍼런스", "링크"],
+        },
+        {
+            "card_id": "p7",
+            "title": "네 번째",
+            "node_path": ["지식", "초과"],
+        },
+    ]
+
+    filtered = reference_context._filter_atom_cards(cards, DEFAULT_ATOM_ROOTS)
+
+    assert [card["card_id"] for card in filtered] == ["p1", "p5", "p6"]
+
+
+def test_personal_atom_filter_honors_configured_roots():
+    cards = [
+        {"card_id": "p1", "title": "지식", "node_path": ["지식"]},
+        {"card_id": "p2", "title": "레퍼런스", "node_path": ["레퍼런스"]},
+    ]
+
+    filtered = reference_context._filter_atom_cards(cards, ("레퍼런스",))
+
+    assert [card["card_id"] for card in filtered] == ["p2"]
+
+
+def test_atom_nl_filter_excludes_history_paths_and_summary_titles():
+    cards = [
+        {
+            "card_id": "n1",
             "title": "패치 노트",
-            "snippet": "내용",
             "node_path": ["엠버 앤 블레이드", "패치 노트"],
         },
         {
-            "card_id": "a2",
+            "card_id": "n2",
             "title": "채널 개입 이력",
-            "snippet": "제외",
             "node_path": ["서소영", "채널 개입 이력"],
         },
         {
-            "card_id": "a3",
+            "card_id": "n3",
             "title": "슬랙 대화",
-            "snippet": "제외",
             "node_path": ["슬랙 대화", "C1"],
         },
         {
-            "card_id": "a1",
-            "title": "중복",
-            "snippet": "중복",
-            "node_path": ["엠버 앤 블레이드"],
-        },
-        {
-            "card_id": "a4",
-            "title": "팀 관심사",
-            "snippet": "내용",
+            "card_id": "n4",
+            "title": "📚 참여자 사실",
             "node_path": ["팀"],
         },
         {
-            "card_id": "a5",
+            "card_id": "n5",
+            "title": "🗒️ 채널 기억",
+            "node_path": ["팀"],
+        },
+        {
+            "card_id": "n1",
+            "title": "중복",
+            "node_path": ["팀"],
+        },
+        {
+            "card_id": "n6",
+            "title": "두 번째",
+            "node_path": ["팀"],
+        },
+        {
+            "card_id": "n7",
+            "title": "세 번째",
+            "node_path": ["팀"],
+        },
+        {
+            "card_id": "n8",
             "title": "네 번째",
-            "snippet": "제외",
             "node_path": ["팀"],
         },
     ]
 
-    filtered = reference_context._filter_atom_cards(cards)
+    filtered = reference_context._filter_atom_nl_cards(cards)
 
-    assert [card["card_id"] for card in filtered] == ["a1", "a4", "a5"]
+    assert [card["card_id"] for card in filtered] == ["n1", "n6", "n7"]
 
 
 def test_session_filter_checks_node_folder_relevance_and_limits():
@@ -210,13 +299,13 @@ def test_session_filter_checks_node_folder_relevance_and_limits():
 
 
 @pytest.mark.asyncio
-async def test_both_empty_returns_none(monkeypatch):
-    monkeypatch.setattr(
-        reference_context, "_search_atom_cards", AsyncMock(return_value=[])
-    )
-    monkeypatch.setattr(
-        reference_context, "_search_session_results", AsyncMock(return_value=[])
-    )
+async def test_all_empty_returns_none(monkeypatch):
+    for searcher in (
+        "_search_personal_atom_cards",
+        "_search_atom_nl_cards",
+        "_search_session_results",
+    ):
+        monkeypatch.setattr(reference_context, searcher, AsyncMock(return_value=[]))
 
     item = await build_reference_context_item(
         "GPU 품절", make_reference(), channel_id="C_TEST",
@@ -226,11 +315,25 @@ async def test_both_empty_returns_none(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_one_side_failure_renders_the_other(monkeypatch, caplog):
+async def test_one_source_failure_renders_the_others(monkeypatch, caplog):
     monkeypatch.setattr(
         reference_context,
-        "_search_atom_cards",
-        AsyncMock(side_effect=RuntimeError("atom unavailable")),
+        "_search_personal_atom_cards",
+        AsyncMock(side_effect=RuntimeError("personal unavailable")),
+    )
+    monkeypatch.setattr(
+        reference_context,
+        "_search_atom_nl_cards",
+        AsyncMock(
+            return_value=[
+                {
+                    "card_id": "n1",
+                    "title": "팀 패치 노트",
+                    "snippet": "팀 지식",
+                    "node_path": ["엠버 앤 블레이드"],
+                }
+            ]
+        ),
     )
     monkeypatch.setattr(
         reference_context,
@@ -260,16 +363,92 @@ async def test_one_side_failure_renders_the_other(monkeypatch, caplog):
     assert item["key"] == "reference_context"
     assert item["label"] == "참고 자료"
     assert "검색어: GPU 품절" in item["content"]
-    assert "### atom-nl" not in item["content"]
+    assert "### atom\n" not in item["content"]
+    assert "### atom-nl (팀)\n- [팀 패치 노트]" in item["content"]
     assert "### 지난 작업 세션" in item["content"]
     assert "- GPU 조사 — 엠버 앤 블레이드, 2026-10-20 — GPU 공급 일정 확인" in item["content"]
     assert "reference context atom 검색 실패 (C_TEST): RuntimeError" in caplog.text
-    assert "atom unavailable" not in caplog.text
+    assert "personal unavailable" not in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_slow_side_is_dropped_at_deadline(monkeypatch):
-    async def slow_atom(_reference, _query):
+async def test_render_order_and_info_log_counts(monkeypatch, caplog):
+    monkeypatch.setattr(
+        reference_context,
+        "_search_personal_atom_cards",
+        AsyncMock(
+            return_value=[
+                {"card_id": "p1", "title": "개인 지식", "node_path": ["지식"]},
+                {"card_id": "p2", "title": "사적 카드", "node_path": ["사용자"]},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        reference_context,
+        "_search_atom_nl_cards",
+        AsyncMock(
+            return_value=[
+                {"card_id": "n1", "title": "팀 지식", "node_path": ["팀"]},
+                {"card_id": "n2", "title": "📚 요약", "node_path": ["팀"]},
+                {"card_id": "n3", "title": "팀 메모", "node_path": ["팀"]},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        reference_context,
+        "_search_session_results",
+        AsyncMock(
+            return_value=[
+                {
+                    "session_id": "s1",
+                    "title": "지난 세션",
+                    "node_id": "eias-linegames",
+                    "folder_id": "C_OTHER",
+                    "relevance": 0.9,
+                }
+            ]
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        item = await build_reference_context_item(
+            "GPU 품절", make_reference(), channel_id="C_TEST",
+        )
+
+    content = item["content"]
+    assert content.index("### atom\n") < content.index("### atom-nl (팀)\n")
+    assert content.index("### atom-nl (팀)\n") < content.index("### 지난 작업 세션\n")
+    assert "개인 지식" in content
+    assert "사적 카드" not in content
+    assert "팀 지식" in content
+    assert "📚 요약" not in content
+    assert "atom 1/2, atom-nl 2/3, sessions 1/1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_atom_nl_disabled_by_config_skips_the_call(monkeypatch):
+    atom_nl = AsyncMock(return_value=[])
+    monkeypatch.setattr(reference_context, "_search_atom_nl_cards", atom_nl)
+    monkeypatch.setattr(
+        reference_context, "_search_personal_atom_cards", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(
+        reference_context, "_search_session_results", AsyncMock(return_value=[])
+    )
+
+    item = await build_reference_context_item(
+        "GPU 품절",
+        make_reference(atom_nl_enabled=False),
+        channel_id="C_TEST",
+    )
+
+    assert item is None
+    atom_nl.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slow_source_is_dropped_at_deadline(monkeypatch):
+    async def slow_atom_nl(_reference, _query):
         await asyncio.sleep(1)
         return [
             {
@@ -280,7 +459,10 @@ async def test_slow_side_is_dropped_at_deadline(monkeypatch):
             }
         ]
 
-    monkeypatch.setattr(reference_context, "_search_atom_cards", slow_atom)
+    monkeypatch.setattr(
+        reference_context, "_search_personal_atom_cards", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(reference_context, "_search_atom_nl_cards", slow_atom_nl)
     monkeypatch.setattr(
         reference_context,
         "_search_session_results",
@@ -307,23 +489,39 @@ async def test_slow_side_is_dropped_at_deadline(monkeypatch):
     assert item is not None
     assert "빠른 세션" in item["content"]
     assert "늦은 카드" not in item["content"]
-    assert "### atom-nl" not in item["content"]
+    assert "### atom-nl (팀)" not in item["content"]
 
 
 @pytest.mark.asyncio
-async def test_atom_search_http_uses_atom_nl_key_and_limit():
-    client = FakePostClient(tool_response([{"card_id": "a1"}]))
+async def test_personal_atom_http_uses_own_key_and_limit():
+    client = FakePostClient(tool_response([{"card_id": "p1"}]))
 
-    cards = await reference_context._search_atom_cards(
+    cards = await reference_context._search_personal_atom_cards(
         make_reference(), "GPU", client=client,
     )
 
-    assert cards == [{"card_id": "a1"}]
+    assert cards == [{"card_id": "p1"}]
+    path, payload, headers = client.posts[0]
+    assert path == "/mcp"
+    assert payload["params"]["name"] == "search_cards"
+    assert payload["params"]["arguments"] == {"query": "GPU", "limit": 30}
+    assert headers["x-api-key"] == "personal-secret"
+
+
+@pytest.mark.asyncio
+async def test_atom_nl_http_uses_own_key_and_limit():
+    client = FakePostClient(tool_response([{"card_id": "n1"}]))
+
+    cards = await reference_context._search_atom_nl_cards(
+        make_reference(), "GPU", client=client,
+    )
+
+    assert cards == [{"card_id": "n1"}]
     path, payload, headers = client.posts[0]
     assert path == "/mcp"
     assert payload["params"]["name"] == "search_cards"
     assert payload["params"]["arguments"] == {"query": "GPU", "limit": 8}
-    assert headers["x-api-key"] == "atom-secret"
+    assert headers["x-api-key"] == "atom-nl-secret"
 
 
 @pytest.mark.asyncio
@@ -347,7 +545,38 @@ async def test_session_search_http_uses_orch_endpoint_and_bearer():
     assert headers["Authorization"] == "Bearer orch-secret"
 
 
-def test_env_values_win_when_both_atom_variables_are_set(monkeypatch, tmp_path):
+def test_personal_atom_key_env_is_resolved_from_config(monkeypatch):
+    clear_source_env(monkeypatch)
+    monkeypatch.setenv("PERSONAL_ATOM_TEST_KEY", "personal-key")
+
+    reference = make_reference_search(
+        {
+            "reference_atom_url": "https://atom.example.test/",
+            "reference_atom_key_env": "PERSONAL_ATOM_TEST_KEY",
+            "reference_atom_roots": ["지식", "레퍼런스"],
+        }
+    )
+
+    assert reference.personal_atom_base_url == "https://atom.example.test"
+    assert reference.personal_atom_api_key == "personal-key"
+    assert reference.atom_roots == ("지식", "레퍼런스")
+    assert reference.personal_atom_enabled is True
+
+
+def test_personal_atom_disabled_when_key_env_is_missing(monkeypatch, caplog):
+    clear_source_env(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        reference = make_reference_search({})
+
+    assert reference.personal_atom_base_url == ""
+    assert reference.personal_atom_api_key == ""
+    assert reference.personal_atom_enabled is False
+    assert "개인 atom 검색 비활성" in caplog.text
+
+
+def test_atom_nl_env_values_win_when_both_variables_are_set(monkeypatch, tmp_path):
+    clear_source_env(monkeypatch)
     monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setenv("ATOM_NL_BASE_URL", "https://env-atom.test")
     monkeypatch.setenv("ATOM_NL_API_KEY", "env-key")
@@ -369,12 +598,13 @@ def test_env_values_win_when_both_atom_variables_are_set(monkeypatch, tmp_path):
 
     assert reference.atom_base_url == "https://env-atom.test"
     assert reference.atom_api_key == "env-key"
+    assert reference.atom_nl_active is True
 
 
 def test_partial_env_falls_back_to_mcp_json(monkeypatch, tmp_path, caplog):
+    clear_source_env(monkeypatch)
     monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setenv("ATOM_NL_BASE_URL", "https://env-atom.test")
-    monkeypatch.delenv("ATOM_NL_API_KEY", raising=False)
     (tmp_path / ".mcp.json").write_text(
         json.dumps(
             {
@@ -397,24 +627,37 @@ def test_partial_env_falls_back_to_mcp_json(monkeypatch, tmp_path, caplog):
     assert "file-key" not in caplog.text
 
 
-def test_missing_atom_config_disables_atom_and_warns_without_key(
+def test_missing_atom_configs_disable_sources_and_never_log_keys(
     monkeypatch, tmp_path, caplog,
 ):
+    clear_source_env(monkeypatch)
     monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setenv("ATOM_NL_API_KEY", "partial-secret")
-    monkeypatch.delenv("ATOM_NL_BASE_URL", raising=False)
-    monkeypatch.delenv("ATOM_NL_SERVER_URL", raising=False)
-    monkeypatch.delenv("SOULSTREAM_ORCH_URL", raising=False)
-    monkeypatch.delenv("SOULSTREAM_ORCH_TOKEN", raising=False)
 
     with caplog.at_level(logging.WARNING):
         reference = make_reference_search({})
 
+    assert reference.personal_atom_base_url == ""
     assert reference.atom_base_url == ""
     assert reference.orch_base_url == ""
-    assert "atom" in caplog.text
+    assert "atom-nl" in caplog.text
     assert "SOULSTREAM_ORCH" in caplog.text
     assert "partial-secret" not in caplog.text
+
+
+def test_reference_atom_nl_false_disables_resolution(monkeypatch, caplog):
+    clear_source_env(monkeypatch)
+    monkeypatch.setenv("ATOM_NL_BASE_URL", "https://env-atom.test")
+    monkeypatch.setenv("ATOM_NL_API_KEY", "env-key")
+
+    with caplog.at_level(logging.WARNING):
+        reference = make_reference_search({"reference_atom_nl": False})
+
+    assert reference.atom_nl_enabled is False
+    assert reference.atom_base_url == ""
+    assert reference.atom_api_key == ""
+    assert reference.atom_nl_active is False
+    assert "atom-nl 검색 비활성" not in caplog.text
 
 
 LEAKED_KEY = "sk-leak-9f3c"
@@ -423,7 +666,8 @@ LEAKED_KEY = "sk-leak-9f3c"
 @pytest.mark.parametrize(
     ("searcher", "source"),
     [
-        ("_search_atom_cards", "atom"),
+        ("_search_personal_atom_cards", "atom"),
+        ("_search_atom_nl_cards", "atom-nl"),
         ("_search_session_results", "session"),
     ],
 )
@@ -444,7 +688,8 @@ async def test_search_failure_logs_exception_type_without_message(
 
     assert f"reference context {source} 검색 실패 (C_TEST): RuntimeError" in caplog.text
     assert LEAKED_KEY not in caplog.text
-    assert "atom-secret" not in caplog.text
+    assert "personal-secret" not in caplog.text
+    assert "atom-nl-secret" not in caplog.text
     assert "orch-secret" not in caplog.text
 
 
@@ -473,12 +718,12 @@ async def test_search_failure_logs_status_code_for_http_status_error(
 
 @pytest.mark.asyncio
 async def test_build_failure_logs_exception_type_without_message(monkeypatch, caplog):
-    monkeypatch.setattr(
-        reference_context, "_search_atom_cards", AsyncMock(return_value=[])
-    )
-    monkeypatch.setattr(
-        reference_context, "_search_session_results", AsyncMock(return_value=[])
-    )
+    for searcher in (
+        "_search_personal_atom_cards",
+        "_search_atom_nl_cards",
+        "_search_session_results",
+    ):
+        monkeypatch.setattr(reference_context, searcher, AsyncMock(return_value=[]))
     monkeypatch.setattr(
         reference_context,
         "_render_context_item",
@@ -512,17 +757,20 @@ async def test_pipeline_injects_reference_context_without_prep(
     monkeypatch.setattr(pipeline, "build_remiel_context_item", AsyncMock(return_value=None))
     monkeypatch.setattr(
         reference_context,
-        "_search_atom_cards",
+        "_search_personal_atom_cards",
         AsyncMock(
             return_value=[
                 {
-                    "card_id": "a1",
+                    "card_id": "p1",
                     "title": "패치 노트",
                     "snippet": "GPU 공급",
-                    "node_path": ["엠버 앤 블레이드", "패치 노트"],
+                    "node_path": ["지식", "패치 노트"],
                 }
             ]
         ),
+    )
+    monkeypatch.setattr(
+        reference_context, "_search_atom_nl_cards", AsyncMock(return_value=[])
     )
     monkeypatch.setattr(
         reference_context, "_search_session_results", AsyncMock(return_value=[])
