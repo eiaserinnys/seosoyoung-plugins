@@ -8,8 +8,8 @@ pending 버퍼에 쌓인 메시지를 기반으로:
 5. pending을 judged로 이동
 
 이 모듈은 기존 테스트가 내부 정책 함수와 SDK patch surface를 직접 참조하는 호환
-facade라 500줄을 초과한다. 이번 변경의 신규 준비 로직과 외부 wire 로직은 각각
-intervention_prep.py, reference_context.py, mcp_http.py에 두고 여기에는 orchestration만 둔다.
+facade라 500줄을 초과한다. 준비 및 외부 wire의 세부 구현은 별도 모듈에 두고,
+여기에는 orchestration만 둔다.
 """
 
 import asyncio
@@ -50,9 +50,6 @@ from seosoyoung_plugins.channel_observer.intervention_prep import (
     InterventionPrepServices,
     build_intervention_prep,
     run_and_name_session,
-)
-from seosoyoung_plugins.channel_observer.reference_context import (
-    build_reference_context_item,
 )
 from seosoyoung_plugins.channel_observer.observer import (
     ChannelObserver,
@@ -1078,7 +1075,6 @@ async def _execute_intervene(
     (
         channel_memory,
         member_facts,
-        reference_context_item,
         remiel_context_item,
     ) = await asyncio.gather(
         (
@@ -1090,11 +1086,6 @@ async def _execute_intervene(
             memory.load_member_facts(channel_id, participant_ids)
             if memory is not None and participant_ids
             else _no_intervene_memory()
-        ),
-        build_reference_context_item(
-            trigger_message.get("text") if trigger_message else None,
-            getattr(services, "reference", None),
-            channel_id=channel_id,
         ),
         build_remiel_context_item(
             remiel_config,
@@ -1116,8 +1107,6 @@ async def _execute_intervene(
     member_facts_item = render_member_facts_item(member_facts)
     if member_facts_item:
         context_items.append(member_facts_item)
-    if reference_context_item:
-        context_items.append(reference_context_item)
     if remiel_context_item:
         context_items.append(remiel_context_item)
 

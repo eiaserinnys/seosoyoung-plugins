@@ -17,14 +17,11 @@ from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung_plugins.channel_observer import pipeline_lock
 from seosoyoung_plugins.channel_observer.intervene_memory import InterveneMemory
 from seosoyoung_plugins.channel_observer.intervention_prep import (
+    InterventionPrepServices,
     default_prep_output_dir,
 )
 from seosoyoung_plugins.channel_observer.mcp_http import (
     make_session_name_setter,
-)
-from seosoyoung_plugins.channel_observer.reference_context import (
-    ReferenceContextServices,
-    make_reference_search,
 )
 from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
@@ -112,9 +109,8 @@ class ChannelObserverPlugin(Plugin):
         self._llm_call = (
             self._make_llm_call() if self._soulstream else None
         )
-        self._prep_services = ReferenceContextServices(
+        self._prep_services = InterventionPrepServices(
             output_dir=default_prep_output_dir(),
-            reference=make_reference_search(config),
             set_session_name=make_session_name_setter(
                 soulstream_url, soulstream_token,
             ),

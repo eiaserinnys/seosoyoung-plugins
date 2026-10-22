@@ -14,10 +14,6 @@ from seosoyoung_plugins.channel_observer.intervention_prep import (
     InterventionPrep,
     InterventionPrepServices,
 )
-from seosoyoung_plugins.channel_observer.reference_context import (
-    ReferenceConfig,
-    ReferenceContextServices,
-)
 
 
 async def _drain_background() -> None:
@@ -149,21 +145,15 @@ async def test_context_order_and_participant_ids(mock_plugin_sdk, monkeypatch, t
             ]
         },
     )
-    reference_item = {"key": "reference_context", "label": "참고", "content": "ref"}
     remiel_item = {"key": "remiel_context", "label": "remiel", "content": "rem"}
-    reference_builder = AsyncMock(return_value=reference_item)
     remiel_builder = AsyncMock(return_value=remiel_item)
     prep_builder = AsyncMock(return_value=_prep())
     _patch_context(monkeypatch, pipeline, ts=["1"])
-    monkeypatch.setattr(pipeline, "build_reference_context_item", reference_builder)
     monkeypatch.setattr(pipeline, "build_remiel_context_item", remiel_builder)
     monkeypatch.setattr(pipeline, "build_intervention_prep", prep_builder)
     mock_plugin_sdk["soulstream"].run = AsyncMock(return_value=_run_result(["응답"]))
 
-    reference = ReferenceConfig(atom_base_url="http://atom", atom_api_key="k")
-    services = ReferenceContextServices(
-        output_dir=tmp_path, reference=reference, memory=memory,
-    )
+    services = InterventionPrepServices(output_dir=tmp_path, memory=memory)
     pending = [
         {"ts": "1", "user": "U1", "text": "앞선", "thread_ts": "9"},
         {"ts": "2", "user": "UBOT", "text": "봇"},
@@ -187,13 +177,9 @@ async def test_context_order_and_participant_ids(mock_plugin_sdk, monkeypatch, t
         "thread_context",
         "channel_memory",
         "member_facts",
-        "reference_context",
         "remiel_context",
     ]
     assert memory.member_calls == [("C_TEST", ["U1", "U2", "U4"])]
-    reference_builder.assert_awaited_once_with(
-        "트리거", reference, channel_id="C_TEST",
-    )
     prep_kwargs = prep_builder.await_args.kwargs
     assert prep_kwargs["slug"]
     assert prep_kwargs["thread_context"].startswith("[C_TEST:1]")
