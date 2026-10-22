@@ -175,6 +175,47 @@ async def test_session_is_named_before_long_running_agent_finishes():
 
 
 @pytest.mark.asyncio
+async def test_run_result_returns_before_slow_prep_finishes():
+    """prep이 세션보다 늦어도 게시를 막지 않고, prep 완료 뒤 백그라운드로 이름을 붙인다."""
+    from seosoyoung_plugins.channel_observer import intervene_memory
+
+    release = asyncio.Event()
+    named = []
+
+    async def slow_prep():
+        await release.wait()
+        return await _resolved_prep("🗯️ 늦은 제목 개입")
+
+    async def set_name(session_id, name):
+        named.append((session_id, name))
+
+    result = await run_and_name_session(
+        asyncio.sleep(
+            0,
+            result=RunResult(
+                ok=True,
+                status=RunStatus.COMPLETED,
+                session_id="session-slow",
+            ),
+        ),
+        thread_ts="1000.1",
+        prep_task=asyncio.create_task(slow_prep()),
+        get_session_id=lambda _thread_ts: "session-slow",
+        set_session_name=set_name,
+        poll_interval=0.01,
+    )
+
+    assert result.session_id == "session-slow"
+    assert named == []
+
+    release.set()
+    while intervene_memory._background_tasks:
+        await asyncio.gather(*list(intervene_memory._background_tasks))
+
+    assert named == [("session-slow", "🗯️ 늦은 제목 개입")]
+
+
+@pytest.mark.asyncio
 async def test_session_run_is_cancelled_with_naming_wrapper():
     run_cancelled = asyncio.Event()
 
