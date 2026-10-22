@@ -268,7 +268,6 @@ async def test_execute_injects_prep_and_knowledge_then_names_session(
     assert [item["key"] for item in context] == [
         "thread_context",
         "intervene_prep",
-        "knowledge_context",
     ]
     set_session_name.assert_awaited_once_with(
         "session-123", "🗯️ GPU와 추론 비용 개입"

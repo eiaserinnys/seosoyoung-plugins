@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -208,25 +207,6 @@ async def call_stateful_tool(
 
 SearchCards = Callable[[str], Awaitable[list[dict[str, Any]]]]
 SetSessionName = Callable[[str, str], Awaitable[None]]
-
-
-def make_atom_search_cards(plugin_config: dict[str, Any]) -> SearchCards | None:
-    base_url = str(plugin_config.get("atom_base_url", "") or "").strip().rstrip("/")
-    key_env = str(plugin_config.get("atom_api_key_env", "") or "").strip()
-    api_key = os.environ.get(key_env, "") if key_env else ""
-    if not base_url or not api_key:
-        return None
-    config = McpHttpConfig(base_url=base_url, auth_headers={"x-api-key": api_key})
-
-    async def search_cards(keyword: str) -> list[dict[str, Any]]:
-        result = await call_stateless_tool(
-            config, "search_cards", {"query": keyword, "limit": 5},
-        )
-        if not isinstance(result, list):
-            return []
-        return [item for item in result if isinstance(item, dict)]
-
-    return search_cards
 
 
 def make_session_name_setter(

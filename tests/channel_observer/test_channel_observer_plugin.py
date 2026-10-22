@@ -82,21 +82,32 @@ class TestChannelObserverPluginLifecycle:
         assert plugin._periodic_sec == 300
 
     @pytest.mark.asyncio
-    async def test_on_load_builds_prep_services_from_existing_config(
-        self, plugin, monkeypatch,
+    async def test_on_load_builds_reference_services(
+        self, plugin, monkeypatch, tmp_path,
     ):
-        monkeypatch.setenv("TEST_ATOM_AGENT_KEY", "secret")
-        monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", "/tmp/test-workspace")
+        monkeypatch.setenv("SCRATCH_WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setenv("ATOM_NL_BASE_URL", "https://atom-nl.test")
+        monkeypatch.setenv("ATOM_NL_API_KEY", "secret")
+        monkeypatch.setenv("SOULSTREAM_ORCH_URL", "https://orch.test")
+        monkeypatch.setenv("SOULSTREAM_ORCH_TOKEN", "orch-secret")
         await plugin.on_load(
             {
                 **SAMPLE_CONFIG,
-                "atom_base_url": "https://atom.test",
-                "atom_api_key_env": "TEST_ATOM_AGENT_KEY",
+                "reference_session_nodes": ["eias-linegames"],
+                "reference_session_min_relevance": 0.4,
+                "folder_id": "C_INTERVENE",
             }
         )
 
-        assert str(plugin._prep_services.output_dir) == "/tmp/test-workspace/.local/tmp"
-        assert callable(plugin._prep_services.search_cards)
+        reference = plugin._prep_services.reference
+        assert str(plugin._prep_services.output_dir) == f"{tmp_path}/.local/tmp"
+        assert reference.atom_base_url == "https://atom-nl.test"
+        assert reference.atom_api_key == "secret"
+        assert reference.orch_base_url == "https://orch.test"
+        assert reference.orch_token == "orch-secret"
+        assert reference.session_nodes == ("eias-linegames",)
+        assert reference.session_min_relevance == 0.4
+        assert reference.folder_id == "C_INTERVENE"
         assert callable(plugin._prep_services.set_session_name)
 
     @pytest.mark.asyncio
