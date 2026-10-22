@@ -266,6 +266,7 @@ async def _search_session_results(
         "top_k": 10,
         "include_session_results": "true",
         "session_search_mode": "expanded",
+        "search_session_id": "true",
     }
     headers = {"Authorization": f"Bearer {reference.orch_token}"}
     if client is not None:

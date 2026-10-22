@@ -340,6 +340,7 @@ async def test_session_search_http_uses_orch_endpoint_and_bearer():
         "top_k": 10,
         "include_session_results": "true",
         "session_search_mode": "expanded",
+        "search_session_id": "true",
     }
     assert headers["Authorization"] == "Bearer orch-secret"
 
