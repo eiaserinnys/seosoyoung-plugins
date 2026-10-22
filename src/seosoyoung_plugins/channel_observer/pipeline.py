@@ -18,6 +18,7 @@ import math
 import os
 import random
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -37,7 +38,14 @@ from seosoyoung_plugins.channel_observer.intervention import (
     send_intervention_probability_debug_log,
     send_multi_judge_debug_log,
 )
+from seosoyoung_plugins.channel_observer.intervene_memory import (
+    parse_record_tags,
+    render_channel_memory_item,
+    render_member_facts_item,
+    spawn_background,
+)
 from seosoyoung_plugins.channel_observer.intervention_prep import (
+    KST,
     InterventionPrepServices,
     build_intervention_prep,
     run_and_name_session,
@@ -875,6 +883,10 @@ def _make_resolver() -> DisplayNameResolver | None:
     return DisplayNameResolver(raw_client) if raw_client else None
 
 
+async def _no_intervene_memory() -> None:
+    return None
+
+
 async def _execute_intervene(
     store: ChannelStore,
     channel_id: str,
@@ -1027,37 +1039,91 @@ async def _execute_intervene(
     ]
 
     services = prep_services or InterventionPrepServices()
-    prep = await build_intervention_prep(
-        llm_call=llm_call,
-        channel_id=channel_id,
-        thread_context=thread_context,
-        output_dir=services.output_dir,
-        message_timestamps=list(
-            dict.fromkeys([*remiel_timestamps, *reply_timestamps])
+    memory = getattr(services, "memory", None)
+    slug = datetime.now(KST).strftime("%Y%m%d-%H%M%S")
+    prep_task = asyncio.create_task(
+        build_intervention_prep(
+            llm_call=llm_call,
+            channel_id=channel_id,
+            thread_context=thread_context,
+            output_dir=services.output_dir,
+            slug=slug,
+            message_timestamps=list(
+                dict.fromkeys([*remiel_timestamps, *reply_timestamps])
+            ),
+        )
+    )
+
+    participant_ids: list[str] = []
+
+    def _add_participant(user_id: str | None) -> None:
+        if (
+            user_id
+            and user_id != bot_user_id
+            and user_id not in participant_ids
+            and len(participant_ids) < 10
+        ):
+            participant_ids.append(user_id)
+
+    for message in recent_messages:
+        _add_participant(message.get("user"))
+    if trigger_message:
+        _add_participant(trigger_message.get("user"))
+    for thread_ts in relevant_thread_timestamps:
+        for message in (thread_buffers or {}).get(thread_ts, [])[-20:]:
+            _add_participant(message.get("user"))
+
+    preload_started = time.monotonic()
+    (
+        channel_memory,
+        member_facts,
+        reference_context_item,
+        remiel_context_item,
+    ) = await asyncio.gather(
+        (
+            memory.load_channel_memory(channel_id)
+            if memory is not None
+            else _no_intervene_memory()
+        ),
+        (
+            memory.load_member_facts(channel_id, participant_ids)
+            if memory is not None and participant_ids
+            else _no_intervene_memory()
+        ),
+        build_reference_context_item(
+            trigger_message.get("text") if trigger_message else None,
+            getattr(services, "reference", None),
+            channel_id=channel_id,
+        ),
+        build_remiel_context_item(
+            remiel_config,
+            channel_id=channel_id,
+            timestamps=remiel_timestamps,
         ),
     )
-    if prep:
-        context_items.append(prep.context_item)
-
-    reference_context_item = await build_reference_context_item(
-        trigger_message.get("text") if trigger_message else None,
-        getattr(services, "reference", None),
-        channel_id=channel_id,
+    logger.info(
+        "intervene preload (%s): channel=%s, members=%d/%d, %dms",
+        channel_id,
+        "hit" if channel_memory else "none",
+        len((member_facts or {}).get("members") or []),
+        len(participant_ids),
+        int((time.monotonic() - preload_started) * 1000),
     )
+
+    if channel_memory:
+        context_items.append(render_channel_memory_item(channel_memory))
+    member_facts_item = render_member_facts_item(member_facts)
+    if member_facts_item:
+        context_items.append(member_facts_item)
     if reference_context_item:
         context_items.append(reference_context_item)
-
-    remiel_context_item = await build_remiel_context_item(
-        remiel_config,
-        channel_id=channel_id,
-        timestamps=remiel_timestamps,
-    )
     if remiel_context_item:
         context_items.append(remiel_context_item)
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
+    run_result = None
     try:
-        result = await run_and_name_session(
+        run_result = await run_and_name_session(
             soulstream.run(
                 prompt=prompt,
                 channel=channel_id,
@@ -1079,108 +1145,135 @@ async def _execute_intervene(
                 ),
             ),
             thread_ts=run_thread_ts,
-            suggested_title=prep.suggested_title if prep else None,
+            prep_task=prep_task,
             get_session_id=soulstream.get_session_id,
             set_session_name=services.set_session_name,
         )
-        if not result.ok:
-            logger.error(f"intervene soulstream 실패 ({channel_id}): {result.error}")
-            await _remove_thinking_reaction(channel_id, reaction_ts)
-            return
-
-        # 게시 정책 (사용자 결정 2026-05-18, 사이클 260518.01):
-        #   - backend가 thinking / text_start~text_end / complete 각 *블록의 텍스트만*에서
-        #     ``<utterance>(.*?)</utterance>`` 매치를 추출하여 ``RunResult.utterances`` list로
-        #     반환한다 (책임: 블록 단위 추출).
-        #   - 본 호출자는 그 list에 strip 동일성 dedupe를 적용한 뒤(중복 차단),
-        #     남은 본문들을 줄바꿈으로 합쳐 채널에 게시한다.
-        #   - 매치 list가 비어 있거나 strip 후 모두 공백이면 게시하지 않는다 —
-        #     sub-agent 작업 보고나 분석/메모가 채널에 누출되지 않도록 차단.
-        #
-        # *직전 사이클*(260513.01)이 사용한 ``transcript`` 누적 검색 정책은 폐기.
-        # 누적 transcript에 thinking 묶음의 우발 ``<utterance>`` 토큰이 text 묶음의
-        # 정상 ``</utterance>``와 인접하여 한 덩이 매치로 분석 텍스트 전체를 흘리는
-        # 사고(채널 C08KT1HDU5U, ts 1779069595.658659, 2026-05-18)가 본 회귀의 계기.
-        raw_matches = list(getattr(result, "utterances", None) or [])
-        unique = _dedupe_utterances(raw_matches)
-        if not unique:
-            logger.warning(
-                f"intervene 게시 skip — <utterance> 매치 없음 ({channel_id}): "
-                f"raw_matches={len(raw_matches)}"
-            )
-            await _remove_thinking_reaction(channel_id, reaction_ts)
-            return
-        response_text = "\n".join(unique)
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")
         await _remove_thinking_reaction(channel_id, reaction_ts)
-        return
+
+    response_text: str | None = None
+    if run_result is not None:
+        if not run_result.ok:
+            logger.error(f"intervene soulstream 실패 ({channel_id}): {run_result.error}")
+            await _remove_thinking_reaction(channel_id, reaction_ts)
+        else:
+            # 게시 정책 (사용자 결정 2026-05-18, 사이클 260518.01):
+            #   - backend가 thinking / text_start~text_end / complete 각 *블록의 텍스트만*에서
+            #     ``<utterance>(.*?)</utterance>`` 매치를 추출하여 ``RunResult.utterances`` list로
+            #     반환한다 (책임: 블록 단위 추출).
+            #   - 본 호출자는 그 list에 strip 동일성 dedupe를 적용한 뒤(중복 차단),
+            #     남은 본문들을 줄바꿈으로 합쳐 채널에 게시한다.
+            #   - 매치 list가 비어 있거나 strip 후 모두 공백이면 게시하지 않는다 —
+            #     sub-agent 작업 보고나 분석/메모가 채널에 누출되지 않도록 차단.
+            #
+            # *직전 사이클*(260513.01)이 사용한 ``transcript`` 누적 검색 정책은 폐기.
+            # 누적 transcript에 thinking 묶음의 우발 ``<utterance>`` 토큰이 text 묶음의
+            # 정상 ``</utterance>``와 인접하여 한 덩이 매치로 분석 텍스트 전체를 흘리는
+            # 사고(채널 C08KT1HDU5U, ts 1779069595.658659, 2026-05-18)가 본 회귀의 계기.
+            raw_matches = list(getattr(run_result, "utterances", None) or [])
+            unique = _dedupe_utterances(raw_matches)
+            if not unique:
+                logger.warning(
+                    f"intervene 게시 skip — <utterance> 매치 없음 ({channel_id}): "
+                    f"raw_matches={len(raw_matches)}"
+                )
+                await _remove_thinking_reaction(channel_id, reaction_ts)
+            else:
+                response_text = "\n".join(unique)
 
     # 5. 슬랙 발송 + 봇 응답 ts를 judged에 기록
-    try:
-        if action.target == "channel":
-            result = await slack.send_message(
-                channel=channel_id,
-                text=response_text.strip(),
-            )
-        else:
-            result = await slack.send_message(
-                channel=channel_id,
-                text=response_text.strip(),
-                thread_ts=action.target,
-            )
+    if response_text is not None:
+        try:
+            if action.target == "channel":
+                send_result = await slack.send_message(
+                    channel=channel_id,
+                    text=response_text.strip(),
+                )
+            else:
+                send_result = await slack.send_message(
+                    channel=channel_id,
+                    text=response_text.strip(),
+                    thread_ts=action.target,
+                )
 
-        # 봇 응답을 judged에 기록하여 후속 judge에서 맥락으로 사용
-        resp_ts = result.ts if result.ok else None
+            # 봇 응답을 judged에 기록하여 후속 judge에서 맥락으로 사용
+            resp_ts = send_result.ts if send_result.ok else None
 
-        if resp_ts:
-            bot_msg = {
-                "ts": resp_ts,
-                "user": bot_user_id or "bot",
-                "text": response_text.strip(),
-            }
-            store.append_judged(channel_id, [bot_msg])
-            logger.info(f"봇 응답 judged 기록 ({channel_id}): ts={resp_ts}")
+            if resp_ts:
+                bot_msg = {
+                    "ts": resp_ts,
+                    "user": bot_user_id or "bot",
+                    "text": response_text.strip(),
+                }
+                store.append_judged(channel_id, [bot_msg])
+                logger.info(f"봇 응답 judged 기록 ({channel_id}): ts={resp_ts}")
 
-            # 스레드 대상 개입이면 세션 생성 (후속 멘션 대화 대비)
-            # dispatch 콜백이 전달된 경우 훅으로 요청, 아니면 session_manager 직접 호출
-            if action.target != "channel":
-                dispatch = kwargs.get("dispatch")
-                session_manager = kwargs.get("session_manager")
-                if dispatch:
-                    try:
-                        from seosoyoung.plugin_sdk import HookContext
-                        await dispatch(
-                            "on_soulstream_session_request",
-                            HookContext(
-                                hook_name="on_soulstream_session_request",
-                                args={
-                                    "thread_ts": resp_ts,
-                                    "channel_id": channel_id,
-                                    "source_type": "hybrid",
-                                },
-                            ),
-                        )
-                        logger.info(f"세션 생성 훅 디스패치 ({channel_id}): ts={resp_ts}")
-                    except Exception as e:
-                        logger.error(f"세션 생성 훅 디스패치 실패 ({channel_id}): {e}")
-                elif session_manager:
-                    try:
-                        session_manager.create(
-                            thread_ts=resp_ts,
+                # 스레드 대상 개입이면 세션 생성 (후속 멘션 대화 대비)
+                # dispatch 콜백이 전달된 경우 훅으로 요청, 아니면 session_manager 직접 호출
+                if action.target != "channel":
+                    dispatch = kwargs.get("dispatch")
+                    session_manager = kwargs.get("session_manager")
+                    if dispatch:
+                        try:
+                            from seosoyoung.plugin_sdk import HookContext
+                            await dispatch(
+                                "on_soulstream_session_request",
+                                HookContext(
+                                    hook_name="on_soulstream_session_request",
+                                    args={
+                                        "thread_ts": resp_ts,
+                                        "channel_id": channel_id,
+                                        "source_type": "hybrid",
+                                    },
+                                ),
+                            )
+                            logger.info(f"세션 생성 훅 디스패치 ({channel_id}): ts={resp_ts}")
+                        except Exception as e:
+                            logger.error(f"세션 생성 훅 디스패치 실패 ({channel_id}): {e}")
+                    elif session_manager:
+                        try:
+                            session_manager.create(
+                                thread_ts=resp_ts,
+                                channel_id=channel_id,
+                                source_type="hybrid",
+                            )
+                            logger.info(f"개입 세션 생성 ({channel_id}): ts={resp_ts}")
+                        except Exception as e:
+                            logger.error(f"개입 세션 생성 실패 ({channel_id}): {e}")
+
+                if channel_memory is not None and memory is not None:
+                    topics, summary_line, compressed_summary = parse_record_tags(
+                        run_result.output
+                    )
+                    spawn_background(
+                        memory.record_utterance(
                             channel_id=channel_id,
-                            source_type="hybrid",
+                            body=response_text.strip(),
+                            slug=slug,
+                            topics=topics,
+                            summary_line=summary_line,
+                            compressed_summary=compressed_summary,
+                            channel_memory=channel_memory,
+                            output_dir=services.output_dir,
                         )
-                        logger.info(f"개입 세션 생성 ({channel_id}): ts={resp_ts}")
-                    except Exception as e:
-                        logger.error(f"개입 세션 생성 실패 ({channel_id}): {e}")
+                    )
 
-        # 발송 성공: :ssy-thinking: → :ssy-happy: 교체
-        await _swap_thinking_to_happy(channel_id, reaction_ts)
+            # 발송 성공: :ssy-thinking: → :ssy-happy: 교체
+            await _swap_thinking_to_happy(channel_id, reaction_ts)
 
-    except Exception as e:
-        logger.error(f"intervene 슬랙 발송 실패 ({channel_id}): {e}")
-        await _remove_thinking_reaction(channel_id, reaction_ts)
+        except Exception as e:
+            logger.error(f"intervene 슬랙 발송 실패 ({channel_id}): {e}")
+            await _remove_thinking_reaction(channel_id, reaction_ts)
+
+    if memory is not None:
+        try:
+            prep = await prep_task
+        except Exception:
+            prep = None
+        if prep is not None:
+            spawn_background(memory.archive_threads(channel_id, prep.threads_file))
 
 
 async def _fetch_recent_context(

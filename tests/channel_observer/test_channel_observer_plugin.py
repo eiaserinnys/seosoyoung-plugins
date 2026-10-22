@@ -109,6 +109,20 @@ class TestChannelObserverPluginLifecycle:
         assert reference.session_min_relevance == 0.4
         assert reference.folder_id == "C_INTERVENE"
         assert callable(plugin._prep_services.set_session_name)
+        assert plugin._prep_services.memory is not None
+
+    @pytest.mark.asyncio
+    async def test_on_load_builds_intervene_memory_from_scripts_dir(
+        self, plugin, tmp_path,
+    ):
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+
+        await plugin.on_load(
+            {**SAMPLE_CONFIG, "intervene_scripts_dir": str(scripts)}
+        )
+
+        assert plugin._prep_services.memory.enabled is True
 
     @pytest.mark.asyncio
     async def test_warns_when_agent_profile_makes_intervene_model_ineffective(
