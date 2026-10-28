@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -427,6 +428,160 @@ async def test_message_pipeline_reacts_and_runs_intervention(monkeypatch, mock_p
         recent_bot_reactions=failed_reactions,
     )
     assert "4" not in failed_reactions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pagination", ["sdk", "cursor"])
+async def test_long_thread_uses_last_page_reactions_for_density(
+    monkeypatch, pagination,
+):
+    from seosoyoung.plugin_sdk import slack as slack_sdk
+    from seosoyoung_plugins.channel_observer import pipeline
+    from seosoyoung_plugins.channel_observer.jev_judge import JevChannelJudge
+
+    first_page = [
+        {"ts": f"{index}.000000", "user": "U1", "text": f"답글 {index}"}
+        for index in range(1000, 1200)
+    ]
+    last_page = [
+        {
+            "ts": f"{index}.000000", "user": "U2", "text": f"답글 {index}",
+            "thread_ts": "1000.000000",
+            "reactions": [{"name": "eyes", "users": ["UBOT", "U2"], "count": 2}],
+        }
+        for index in (1200, 1201)
+    ]
+    pages = {
+        None: {"messages": first_page, "response_metadata": {"next_cursor": "page-2"}},
+        "page-2": {"messages": last_page, "response_metadata": {"next_cursor": ""}},
+    }
+    raw_client = SimpleNamespace(conversations_replies=MagicMock(
+        side_effect=lambda **kwargs: pages[kwargs.get("cursor")]
+    ))
+    backend = SimpleNamespace(
+        _client=raw_client,
+        get_thread_replies=AsyncMock(return_value=[
+            Message(item["ts"], item["user"], item["text"]) for item in first_page
+        ]),
+    )
+    monkeypatch.setattr(slack_sdk, "_backend", backend)
+    cursor_calls = []
+
+    async def cursor_replies(channel, thread_ts, *, limit, cursor=None):
+        cursor_calls.append((channel, thread_ts, limit, cursor))
+        return pages[cursor]
+
+    fake_slack = SimpleNamespace(
+        get_backend=lambda: backend,
+        get_thread_replies=(
+            slack_sdk.get_thread_replies if pagination == "sdk" else cursor_replies
+        ),
+        get_channel_history=AsyncMock(return_value=[Message("1000.000000", "U1", "루트")]),
+        add_reaction=AsyncMock(),
+    )
+    monkeypatch.setattr(pipeline, "slack", fake_slack)
+    requests = _install_jev_response(
+        monkeypatch, {"answers": _answers(react=0.9, intervene=0.1)}
+    )
+    emoji_store = MagicMock()
+    emoji_store.get_top_candidates.return_value = {"laughing": "웃음"}
+
+    verdict = await pipeline.run_message_jev_pipeline(
+        channel_id="C1",
+        event={"ts": "1202.000000", "user": "U3", "text": "현재 답글", "thread_ts": "1000.000000"},
+        jev_judge=JevChannelJudge(api_key="secret"),
+        emoji_store=emoji_store,
+        cooldown=MagicMock(),
+        store=None,
+        bot_user_id="UBOT",
+        recent_messages_count=3,
+    )
+
+    assert verdict.suppressed_by_density is True
+    assert verdict.should_react is False
+    fake_slack.add_reaction.assert_not_awaited()
+    state = json.loads(requests[0][2]["state"])
+    assert [item["ts"] for item in state["recent_messages"]] == [
+        "1199.000000", "1200.000000", "1201.000000"
+    ]
+    assert state["recent_messages"][-1]["reactions"] == ["eyes"]
+    assert state["recent_messages"][-1]["bot_reactions"] == ["eyes"]
+    if pagination == "sdk":
+        assert [call.kwargs["cursor"] for call in raw_client.conversations_replies.call_args_list] == [None, "page-2"]
+        assert all(call.kwargs["limit"] == 200 for call in raw_client.conversations_replies.call_args_list)
+    else:
+        assert cursor_calls == [
+            ("C1", "1000.000000", 200, None),
+            ("C1", "1000.000000", 200, "page-2"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_first_page_fallback_preserves_buffer_and_recent_bot_reactions(
+    monkeypatch, mock_plugin_sdk, tmp_path,
+):
+    from seosoyoung_plugins.channel_observer import pipeline
+    from seosoyoung_plugins.channel_observer.jev_judge import JevChannelJudge
+    from seosoyoung_plugins.channel_observer.store import ChannelStore
+
+    monkeypatch.setattr(
+        pipeline.slack, "get_channel_history",
+        AsyncMock(return_value=[Message("1000.000000", "U1", "루트")]),
+    )
+
+    async def first_page_only(channel, thread_ts, limit=100):
+        return [
+            Message("1000.000000", "U1", "루트"),
+            Message("1001.000000", "U1", "오래된 답글", thread_ts=thread_ts),
+        ]
+
+    monkeypatch.setattr(pipeline.slack, "get_thread_replies", first_page_only)
+    intervention = AsyncMock()
+    monkeypatch.setattr(pipeline, "_execute_intervene", intervention)
+    requests = _install_jev_response(
+        monkeypatch, {"answers": _answers(react=0.9, intervene=0.8)}
+    )
+    emoji_store = MagicMock()
+    emoji_store.get_top_candidates.return_value = {"laughing": "웃음"}
+    store = ChannelStore(tmp_path)
+    cooldown = MagicMock()
+    cooldown.burst_probability.return_value = 1.0
+    cooldown.minutes_since_last.return_value = 10.0
+    reaction_history = {"1199.000000": ["eyes"]}
+    common = {
+        "channel_id": "C1", "jev_judge": JevChannelJudge(api_key="secret"),
+        "emoji_store": emoji_store, "cooldown": cooldown, "store": store,
+        "bot_user_id": "UBOT", "recent_messages_count": 3,
+        "recent_bot_reactions": reaction_history, "llm_call": AsyncMock(),
+    }
+
+    first = await pipeline.run_message_jev_pipeline(
+        **common,
+        event={"ts": "1200.000000", "user": "U2", "text": "첫 최신 답글", "thread_ts": "1000.000000"},
+    )
+    second = await pipeline.run_message_jev_pipeline(
+        **common,
+        event={"ts": "1201.000000", "user": "U3", "text": "다음 최신 답글", "thread_ts": "1000.000000"},
+    )
+
+    assert first.should_react is True
+    assert second.suppressed_by_density is True
+    assert mock_plugin_sdk["slack"].add_reaction.await_count == 1
+    assert reaction_history["1200.000000"] == ["laughing"]
+    state = json.loads(requests[1][2]["state"])
+    latest = {item["ts"]: item for item in state["recent_messages"]}
+    assert latest["1199.000000"]["bot_reactions"] == ["eyes"]
+    assert latest["1200.000000"]["text"] == "첫 최신 답글"
+    assert latest["1200.000000"]["bot_reactions"] == ["laughing"]
+    assert [item["ts"] for item in store.load_thread_buffer("C1", "1000.000000")] == [
+        "1200.000000", "1201.000000"
+    ]
+    replies = intervention.await_args.kwargs["thread_buffers"]["1000.000000"]
+    assert [(item["ts"], item["text"]) for item in replies] == [
+        ("1001.000000", "오래된 답글"),
+        ("1200.000000", "첫 최신 답글"),
+        ("1201.000000", "다음 최신 답글"),
+    ]
 
 
 @pytest.mark.asyncio

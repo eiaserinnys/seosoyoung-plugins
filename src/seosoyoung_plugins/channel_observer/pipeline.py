@@ -13,6 +13,7 @@ facade라 500줄을 초과한다. 준비 및 외부 wire의 세부 구현은 별
 """
 
 import asyncio
+import inspect
 import logging
 import math
 import os
@@ -27,7 +28,7 @@ from seosoyoung.plugin_sdk.caller_info import (
     build_bot_caller_info,
     get_host_preferred_node,
 )
-from seosoyoung.plugin_sdk.slack import Message
+from seosoyoung.plugin_sdk.slack import Message, get_thread_replies as _sdk_get_thread_replies
 from seosoyoung_plugins.channel_observer.collector import (
     COLLECT_EXCLUDED_SUBTYPES,
 )
@@ -896,6 +897,59 @@ async def _no_intervene_memory() -> None:
     return None
 
 
+async def _fetch_latest_thread_replies(
+    channel_id: str, thread_root_ts: str, recent_messages_count: int,
+) -> list[Any]:
+    """Read the thread's pages and retain its root and recent replies."""
+    get_replies = slack.get_thread_replies
+    backend = slack.get_backend() if get_replies is _sdk_get_thread_replies else None
+    client = getattr(backend, "_client", None)
+    use_client = client is not None and hasattr(client, "conversations_replies")
+    try:
+        supports_cursor = "cursor" in inspect.signature(get_replies).parameters
+    except (TypeError, ValueError):
+        supports_cursor = False
+
+    if not use_client and not supports_cursor:
+        return await get_replies(
+            channel_id, thread_root_ts, limit=max(recent_messages_count, 200)
+        )
+
+    messages: list[Any] = []
+    cursor = None
+    for _ in range(20):
+        if use_client:
+            page = await asyncio.to_thread(
+                client.conversations_replies,
+                channel=channel_id, ts=thread_root_ts, limit=200, cursor=cursor,
+            )
+        else:
+            page = await get_replies(
+                channel_id, thread_root_ts,
+                limit=max(recent_messages_count, 200), cursor=cursor,
+            )
+        if isinstance(page, list):
+            messages.extend(page)
+            break
+        if isinstance(page, dict) or use_client:
+            messages.extend(page.get("messages", []))
+            cursor = (page.get("response_metadata") or {}).get("next_cursor")
+        else:
+            messages.extend(page.messages)
+            cursor = page.next_cursor
+        if not cursor:
+            break
+    else:
+        logger.warning("Jev 스레드 답글 조회가 페이지 상한에 도달했습니다 (%s, %s)", channel_id, thread_root_ts)
+
+    def message_ts(message: Any) -> str:
+        return str(message.get("ts", "") if isinstance(message, dict) else message.ts)
+
+    root = [message for message in messages if message_ts(message) == thread_root_ts]
+    replies = [message for message in messages if message_ts(message) != thread_root_ts]
+    return root[:1] + replies[-max(recent_messages_count * 4, 50):]
+
+
 async def run_message_jev_pipeline(
     *,
     channel_id: str,
@@ -963,10 +1017,8 @@ async def run_message_jev_pipeline(
     thread_history: list[Any] = []
     if is_thread_reply:
         try:
-            thread_history = await slack.get_thread_replies(
-                channel_id,
-                thread_root_ts,
-                limit=max(recent_messages_count, 20),
+            thread_history = await _fetch_latest_thread_replies(
+                channel_id, thread_root_ts, recent_messages_count,
             )
         except Exception as error:
             logger.warning(
@@ -984,22 +1036,25 @@ async def run_message_jev_pipeline(
     def _to_jev_message_dict(
         message: Any, *, default_thread_ts: str | None = None
     ) -> dict[str, Any]:
-        message_ts = str(getattr(message, "ts", "") or "")
-        reactions = getattr(message, "reactions", None) or []
-        msg_reactions = [
-            normalize_emoji_name(reaction.name)
-            for reaction in reactions
-            if getattr(reaction, "name", "")
-        ]
-        msg_bot_reactions = [
-            normalize_emoji_name(reaction.name)
-            for reaction in reactions
-            if (
-                getattr(reaction, "name", "")
-                and bot_user_id
-                and bot_user_id in (getattr(reaction, "users", None) or [])
-            )
-        ]
+        def field(value: Any, name: str, default: Any = None) -> Any:
+            return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+        message_ts = str(field(message, "ts") or "")
+        reactions = field(message, "reactions") or []
+        msg_reactions = []
+        msg_bot_reactions = []
+        for reaction in reactions:
+            name = reaction if isinstance(reaction, str) else field(reaction, "name", "")
+            if not name:
+                continue
+            normalized = normalize_emoji_name(name)
+            msg_reactions.append(normalized)
+            if bot_user_id and bot_user_id in (field(reaction, "users") or []):
+                msg_bot_reactions.append(normalized)
+        for emoji in field(message, "bot_reactions", []) or []:
+            normalized = normalize_emoji_name(emoji)
+            if normalized and normalized not in msg_bot_reactions:
+                msg_bot_reactions.append(normalized)
         for emoji in channel_reactions.get(message_ts, []):
             normalized = normalize_emoji_name(emoji)
             if normalized and normalized not in msg_reactions:
@@ -1008,9 +1063,9 @@ async def run_message_jev_pipeline(
                 msg_bot_reactions.append(normalized)
         return {
             "ts": message_ts,
-            "user": getattr(message, "user", None),
-            "text": getattr(message, "text", None) or "",
-            "thread_ts": getattr(message, "thread_ts", None) or default_thread_ts,
+            "user": field(message, "user"),
+            "text": field(message, "text") or "",
+            "thread_ts": field(message, "thread_ts") or default_thread_ts,
             "reactions": msg_reactions,
             "bot_reactions": msg_bot_reactions,
         }
@@ -1028,7 +1083,7 @@ async def run_message_jev_pipeline(
         if item["ts"] and item["ts"] != ts:
             merged_by_ts[item["ts"]] = item
 
-    thread_reply_dicts: list[dict[str, Any]] = []
+    thread_replies_by_ts: dict[str, dict[str, Any]] = {}
     for message in thread_history:
         item = _to_jev_message_dict(message, default_thread_ts=thread_root_ts)
         if not item["ts"]:
@@ -1036,11 +1091,7 @@ async def run_message_jev_pipeline(
         if item["ts"] != ts:
             merged_by_ts[item["ts"]] = item
         if item["ts"] != thread_root_ts:
-            thread_reply_dicts.append(item)
-
-    recent_messages = sorted(merged_by_ts.values(), key=_ts_sort_key)[
-        -recent_messages_count:
-    ]
+            thread_replies_by_ts[item["ts"]] = item
 
     target_message = {
         "ts": ts,
@@ -1048,6 +1099,30 @@ async def run_message_jev_pipeline(
         "text": text,
         "thread_ts": thread_ts,
     }
+    if is_thread_reply:
+        if store is not None:
+            for message in store.load_thread_buffer(channel_id, thread_root_ts):
+                item = _to_jev_message_dict(message, default_thread_ts=thread_root_ts)
+                if item["ts"] and item["ts"] != thread_root_ts:
+                    thread_replies_by_ts.setdefault(item["ts"], item)
+                    if item["ts"] != ts:
+                        merged_by_ts.setdefault(item["ts"], item)
+            store.upsert_thread_message(channel_id, thread_root_ts, target_message)
+        thread_replies_by_ts[ts] = dict(target_message)
+        root_key = _ts_sort_key({"ts": thread_root_ts})
+        current_key = _ts_sort_key({"ts": ts})
+        for reaction_ts in channel_reactions:
+            reaction_key = _ts_sort_key({"ts": reaction_ts})
+            if root_key < reaction_key < current_key and reaction_ts not in merged_by_ts:
+                merged_by_ts[reaction_ts] = _to_jev_message_dict(
+                    {"ts": reaction_ts}, default_thread_ts=thread_root_ts,
+                )
+
+    thread_reply_dicts = sorted(thread_replies_by_ts.values(), key=_ts_sort_key)
+    recent_messages = sorted(merged_by_ts.values(), key=_ts_sort_key)[
+        -recent_messages_count:
+    ]
+
     text_lower = text.lower()
     matched_triggers = [
         word for word in (trigger_words or []) if word.lower() in text_lower
