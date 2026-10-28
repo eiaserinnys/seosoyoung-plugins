@@ -12,6 +12,14 @@ from seosoyoung_plugins.channel_observer.store import ChannelStore
 
 logger = logging.getLogger(__name__)
 
+COLLECT_EXCLUDED_SUBTYPES = {
+    "message_deleted", "channel_join", "channel_leave",
+    "channel_topic", "channel_purpose", "channel_name",
+    "channel_archive", "channel_unarchive",
+    "group_join", "group_leave",
+    "pinned_item", "unpinned_item",
+}
+
 
 class ChannelMessageCollector:
     """관찰 대상 채널의 메시지를 수집하여 버퍼에 저장"""
@@ -19,13 +27,7 @@ class ChannelMessageCollector:
     # 수집 대상 subtype (내용이 있는 메시지)
     _COLLECTIBLE_SUBTYPES = {"bot_message", "message_changed", "me_message", "file_share"}
     # 명시적 스킵 subtype
-    _SKIP_SUBTYPES = {
-        "message_deleted", "channel_join", "channel_leave",
-        "channel_topic", "channel_purpose", "channel_name",
-        "channel_archive", "channel_unarchive",
-        "group_join", "group_leave",
-        "pinned_item", "unpinned_item",
-    }
+    _SKIP_SUBTYPES = COLLECT_EXCLUDED_SUBTYPES
 
     @staticmethod
     def _extract_blocks_text(blocks: list[dict]) -> str:

@@ -1,20 +1,17 @@
-"""Channel Observer plugin.
-
-Collects channel messages, runs digest/judge pipelines, and
-manages periodic digest scheduling. All configuration comes
-from channel_observer.yaml, not from Config singleton or
-environment variables.
-"""
+"""Channel Observer plugin with per-message Jev judgment."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 from seosoyoung.plugin_sdk import HookContext, HookResult, Plugin, PluginMeta
 from seosoyoung_plugins.channel_observer import pipeline_lock
+from seosoyoung_plugins.channel_observer.emoji_frequency import EmojiFrequencyStore
 from seosoyoung_plugins.channel_observer.intervene_memory import InterveneMemory
 from seosoyoung_plugins.channel_observer.intervention_prep import (
     InterventionPrepServices,
@@ -23,6 +20,8 @@ from seosoyoung_plugins.channel_observer.intervention_prep import (
 from seosoyoung_plugins.channel_observer.mcp_http import (
     make_session_name_setter,
 )
+from seosoyoung_plugins.channel_observer.jev_judge import JevChannelJudge
+from seosoyoung_plugins.channel_observer.pipeline import run_message_jev_pipeline
 from seosoyoung_plugins.channel_observer.remiel_context import RemielContextConfig
 from seosoyoung_plugins.soulstream_client import SoulstreamClient
 
@@ -31,11 +30,7 @@ PREP_MAX_TOKENS = 4096
 
 
 class ChannelObserverPlugin(Plugin):
-    """Channel observation and digest management plugin.
-
-    Collects messages from monitored channels via on_message hook,
-    triggers digest/judge pipelines when thresholds are met, and
-    runs a periodic scheduler via on_startup hook.
+    """Judge monitored channel messages and manage intervention context.
 
     No self.enabled flag — if loaded, it's active.
     PluginMeta에 dependencies 없음 — plugins.yaml depends_on이 정본.
@@ -57,6 +52,31 @@ class ChannelObserverPlugin(Plugin):
             "compressor_model", "gpt-5.2"
         )
         self._memory_path: str = config["memory_path"]
+        self._memory_dir = Path(self._memory_path)
+        self._jev_api_key: str = str(
+            config.get("jev_api_key")
+            or os.environ.get("JEV_API_KEY")
+            or os.environ.get("TYPESAFE_API_KEY")
+            or ""
+        ).strip()
+        self._jev_base_url: str = str(
+            config.get("jev_base_url")
+            or os.environ.get("JEV_BASE_URL")
+            or os.environ.get("TYPESAFE_BASE_URL")
+            or "https://api.typesafe.ai"
+        ).strip()
+        self._jev_model: str = str(config.get("jev_model", "jev-latest"))
+        self._jev_timeout: float = float(config.get("jev_timeout", 5.0))
+        self._emoji_threshold: float = float(config.get("emoji_threshold", 0.50))
+        self._intervene_jev_threshold: float = float(
+            config.get("intervene_jev_threshold", 0.65)
+        )
+        self._trigger_intervene_jev_threshold: float = float(
+            config.get("trigger_intervene_jev_threshold", 0.35)
+        )
+        self._emoji_candidate_limit: int = int(
+            config.get("emoji_candidate_limit", 30)
+        )
 
         # Soulstream client
         soulstream_url = config.get("soulstream_url", "")
@@ -106,6 +126,10 @@ class ChannelObserverPlugin(Plugin):
         self._observer_engine = None
         self._compressor = None
         self._scheduler = None
+        self._emoji_store: EmojiFrequencyStore | None = None
+        self._jev_judge: JevChannelJudge | None = None
+        self._recent_bot_reactions: dict[str, dict[str, list[str]]] = {}
+        self._bot_user_id: str | None = None
         self._llm_call = (
             self._make_llm_call() if self._soulstream else None
         )
@@ -142,7 +166,7 @@ class ChannelObserverPlugin(Plugin):
     async def _on_startup(
         self, ctx: HookContext
     ) -> tuple[HookResult, Any]:
-        """Initialize runtime components and start periodic scheduler.
+        """Initialize the stores and components used by message-level Jev.
 
         Receives runtime dependencies via ctx.args from main.py.
         """
@@ -165,17 +189,25 @@ class ChannelObserverPlugin(Plugin):
             ChannelObserver,
             DigestCompressor,
         )
-        from seosoyoung_plugins.channel_observer.scheduler import (
-            ChannelDigestScheduler,
-        )
-
-        self._store = ChannelStore(base_dir=self._memory_path)
+        self._store = ChannelStore(base_dir=self._memory_dir)
         self._collector = ChannelMessageCollector(
             store=self._store,
             target_channels=self._channels,
             bot_user_id=self._bot_user_id,
         )
-        self._cooldown = InterventionHistory(base_dir=self._memory_path)
+        self._cooldown = InterventionHistory(base_dir=self._memory_dir)
+        self._emoji_store = EmojiFrequencyStore(
+            self._memory_dir / "emoji_frequency.json"
+        )
+        self._jev_judge = JevChannelJudge(
+            api_key=self._jev_api_key,
+            base_url=self._jev_base_url,
+            model=self._jev_model,
+            timeout=self._jev_timeout,
+            emoji_threshold=self._emoji_threshold,
+            intervene_threshold=self._intervene_jev_threshold,
+            trigger_intervene_threshold=self._trigger_intervene_jev_threshold,
+        )
 
         if self._soulstream:
             self._observer_engine = ChannelObserver(
@@ -187,37 +219,13 @@ class ChannelObserverPlugin(Plugin):
                 model=self._compressor_model,
             )
 
-        if self._observer_engine and self._periodic_sec > 0:
-            self._scheduler = ChannelDigestScheduler(
-                store=self._store,
-                observer=self._observer_engine,
-                compressor=self._compressor,
-                cooldown=self._cooldown,
-                channels=self._channels,
-                interval_sec=self._periodic_sec,
-                buffer_threshold=self._buffer_threshold,
-                digest_max_tokens=self._digest_max_tokens,
-                digest_target_tokens=self._digest_target_tokens,
-                debug_channel=self._debug_channel,
-                intervention_threshold=self._intervention_threshold,
-                react_probability=self._react_probability,
-                llm_call=self._llm_call,
-                bot_user_id=self._bot_user_id,
-                recent_messages_count=self._recent_messages_count,
-                intervene_model=self._intervene_model,
-                folder_id=self._intervene_folder_id,
-                agent_id=self._intervene_agent_id,
-                remiel_config=self._remiel_config,
-                prep_services=self._prep_services,
-            )
-            self._scheduler.start()
+        self._scheduler = None
 
         logger.info(
             "ChannelObserverPlugin started: channels=%s, "
-            "threshold=%s, periodic=%ds",
+            "threshold=%s, message-level Jev enabled",
             self._channels,
             self._intervention_threshold,
-            self._periodic_sec,
         )
 
         # Return references for handler access
@@ -228,6 +236,8 @@ class ChannelObserverPlugin(Plugin):
             "channel_observer": self._observer_engine,
             "channel_compressor": self._compressor,
             "channel_observer_channels": self._channels,
+            "emoji_frequency_store": self._emoji_store,
+            "jev_judge": self._jev_judge,
         }
 
     async def _on_shutdown(
@@ -241,33 +251,29 @@ class ChannelObserverPlugin(Plugin):
     async def _on_message(
         self, ctx: HookContext
     ) -> tuple[HookResult, Any]:
-        """Collect channel messages and trigger digest pipeline.
+        """Run message-level Jev judgment for a monitored channel message.
 
         This runs before other on_message hooks (priority=20 in
         plugins.yaml, but runs first because higher priority goes first).
         """
-        if not self._collector:
+        if (
+            self._jev_judge is None
+            or self._emoji_store is None
+            or self._store is None
+            or self._cooldown is None
+        ):
             return HookResult.SKIP, None
 
         event = ctx.args.get("event", {})
 
-        channel = event.get("channel", "")
-        if channel not in self._channels:
+        channel_id = event.get("channel", "")
+        if channel_id not in self._channels:
             return HookResult.SKIP, None
 
         try:
-            collected = self._collector.collect(event)
-            if collected:
-                await self._send_collect_log(channel, event)
-                force = self._contains_trigger_word(
-                    event.get("text", "")
-                )
-                self._maybe_trigger_digest(channel, force=force)
+            await self._judge_single_message(channel_id, event)
         except Exception as e:
-            logger.error(f"채널 메시지 수집 실패: {e}")
-
-        # Also handle reactions collection for message events
-        # (actual reaction events are handled separately)
+            logger.error("단일 메시지 Jev 판단 실패: %s", e)
 
         # SKIP — don't stop the chain, let other plugins process
         return HookResult.SKIP, None
@@ -279,9 +285,23 @@ class ChannelObserverPlugin(Plugin):
 
         Called directly from message handler, not via hook dispatch.
         """
-        if not self._collector:
-            return False
-        return self._collector.collect_reaction(event, action)
+        item = event.get("item", {})
+        channel_id = item.get("channel", "")
+        recorded = False
+        if (
+            self._emoji_store is not None
+            and channel_id in self._channels
+            and item.get("type", "message") == "message"
+        ):
+            recorded = self._emoji_store.record_reaction(
+                event.get("reaction", ""),
+                action,
+                user_id=event.get("user"),
+                bot_user_id=self._bot_user_id,
+            )
+            if self._collector is not None:
+                recorded = self._collector.collect_reaction(event, action) or recorded
+        return recorded
 
     # -- Accessors for runtime references --------------------------------------
 
@@ -296,6 +316,31 @@ class ChannelObserverPlugin(Plugin):
         return self._channels
 
     # -- Internal helpers ------------------------------------------------------
+
+    async def _judge_single_message(self, channel_id: str, event: dict) -> Any:
+        return await run_message_jev_pipeline(
+            channel_id=channel_id,
+            event=event,
+            jev_judge=self._jev_judge,
+            emoji_store=self._emoji_store,
+            cooldown=self._cooldown,
+            store=self._store,
+            bot_user_id=self._bot_user_id,
+            trigger_words=self._trigger_words,
+            debug_channel=self._debug_channel,
+            recent_messages_count=self._recent_messages_count,
+            emoji_candidate_limit=self._emoji_candidate_limit,
+            llm_call=self._llm_call,
+            intervene_model=self._intervene_model,
+            folder_id=self._intervene_folder_id,
+            agent_id=self._intervene_agent_id,
+            remiel_config=self._remiel_config,
+            prep_services=self._prep_services,
+            recent_bot_reactions=self._recent_bot_reactions.setdefault(
+                channel_id, {}
+            ),
+            intervention_threshold=self._intervention_threshold,
+        )
 
     def _make_llm_call(
         self,

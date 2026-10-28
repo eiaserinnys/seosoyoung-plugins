@@ -1232,21 +1232,20 @@ class TestBugB_ValidateLinkedWithThreadBuffers:
         assert result.items[0].linked_message_ts == "1.1"
 
 
-# ── Bug C: _execute_intervene에서 엉뚱한 메시지 폴백 방지 ──
+# ── Bug C: _execute_intervene에서 스레드 루트 대상의 맥락 폴백 ──
 
 class TestBugC_InterveneFallbackPrevention:
-    """Bug C: target_ts를 pending에서 못 찾으면 thread_buffers/judged 검색, 실패 시 스킵"""
+    """스레드 루트 ts가 본문 컨텍스트에 없으면 최신 채널 메시지로 폴백"""
 
     @pytest.mark.asyncio
-    async def test_intervene_skipped_when_target_not_found(self, store, channel_id, mock_plugin_sdk):
-        """target_ts가 어디에도 없으면 intervention 자체를 스킵"""
+    async def test_intervene_falls_back_when_target_is_thread_root(self, store, channel_id, mock_plugin_sdk):
+        """스레드 루트 ts가 all_context에 없어도 최신 메시지 맥락으로 개입"""
         _fill_pending(store, channel_id)
-        # target이 pending에 없는 ts
         observer = FakeObserver(judge_result=JudgeResult(
             items=[
                 JudgeItem(ts="1001.000", importance=9, reaction_type="intervene",
-                          reaction_target="NONEXISTENT.000",
-                          reaction_content="엉뚱한 메시지 타겟"),
+                          reaction_target="THREAD_ROOT.000",
+                          reaction_content="스레드 루트에 답변"),
             ],
         ))
         history = InterventionHistory(base_dir=store.base_dir)
@@ -1262,8 +1261,9 @@ class TestBugC_InterveneFallbackPrevention:
             llm_call=mock_llm,
         )
 
-        # target을 찾지 못했으므로 soulstream 호출과 메시지 발송이 없어야 함
-        mock_plugin_sdk["soulstream"].run.assert_not_awaited()
+        # 루트 ts가 본문 컨텍스트에 없어도 최신 pending 메시지로 개입한다.
+        mock_plugin_sdk["soulstream"].run.assert_awaited_once()
+        mock_plugin_sdk["slack"].send_message.assert_called()
 
     @pytest.mark.asyncio
     async def test_intervene_finds_target_in_thread_buffers(self, store, channel_id, mock_plugin_sdk):

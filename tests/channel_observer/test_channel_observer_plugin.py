@@ -57,7 +57,11 @@ class TestChannelObserverPluginLifecycle:
         return ChannelObserverPlugin()
 
     @pytest.mark.asyncio
-    async def test_on_load_sets_fields(self, plugin):
+    async def test_on_load_sets_fields(self, plugin, monkeypatch):
+        for name in (
+            "JEV_API_KEY", "TYPESAFE_API_KEY", "JEV_BASE_URL", "TYPESAFE_BASE_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
         await plugin.on_load(SAMPLE_CONFIG)
         assert plugin._channels == ["C_OBSERVE1", "C_OBSERVE2"]
         assert plugin._soulstream is not None
@@ -66,6 +70,22 @@ class TestChannelObserverPluginLifecycle:
         assert plugin._intervention_threshold == 0.18
         assert plugin._trigger_words == ["서소영", "소영"]
         assert plugin._debug_channel == "C_DEBUG"
+        assert plugin._jev_api_key == ""
+        assert plugin._jev_base_url == "https://api.typesafe.ai"
+        assert plugin._jev_model == "jev-latest"
+        assert plugin._emoji_threshold == 0.50
+
+    @pytest.mark.asyncio
+    async def test_on_load_uses_jev_environment_fallbacks(self, plugin, monkeypatch):
+        monkeypatch.setenv("JEV_API_KEY", "primary-key")
+        monkeypatch.setenv("TYPESAFE_API_KEY", "fallback-key")
+        monkeypatch.setenv("JEV_BASE_URL", "https://jev.example")
+
+        await plugin.on_load(SAMPLE_CONFIG)
+
+        assert plugin._jev_api_key == "primary-key"
+        assert plugin._jev_base_url == "https://jev.example"
+
 
     @pytest.mark.asyncio
     async def test_on_load_missing_memory_path_raises(self, plugin):
@@ -184,13 +204,15 @@ class TestChannelObserverPluginHooks:
         assert result == HookResult.SKIP
 
     @pytest.mark.asyncio
-    async def test_on_message_collects_monitored_channel(self, loaded_plugin):
-        """on_message should collect messages from monitored channels."""
+    async def test_on_message_judges_monitored_channel(self, loaded_plugin):
+        """on_message should run the single-message Jev pipeline."""
         mock_collector = MagicMock()
-        mock_collector.collect.return_value = True
         loaded_plugin._collector = mock_collector
+        loaded_plugin._jev_judge = MagicMock()
+        loaded_plugin._emoji_store = MagicMock()
         loaded_plugin._store = MagicMock()
-        loaded_plugin._store.count_pending_tokens.return_value = 10
+        loaded_plugin._cooldown = MagicMock()
+        loaded_plugin._judge_single_message = AsyncMock()
 
         ctx = HookContext(
             hook_name="on_message",
@@ -207,14 +229,21 @@ class TestChannelObserverPluginHooks:
         result, value = await hooks["on_message"](ctx)
 
         assert result == HookResult.SKIP  # does not stop chain
-        mock_collector.collect.assert_called_once()
+        loaded_plugin._judge_single_message.assert_awaited_once_with(
+            "C_OBSERVE1", ctx.args["event"]
+        )
+        mock_collector.collect.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_on_message_error_is_caught(self, loaded_plugin):
-        """on_message should catch collector errors and still SKIP."""
-        mock_collector = MagicMock()
-        mock_collector.collect.side_effect = RuntimeError("DB fail")
-        loaded_plugin._collector = mock_collector
+        """on_message should catch Jev pipeline errors and still SKIP."""
+        loaded_plugin._jev_judge = MagicMock()
+        loaded_plugin._emoji_store = MagicMock()
+        loaded_plugin._store = MagicMock()
+        loaded_plugin._cooldown = MagicMock()
+        loaded_plugin._judge_single_message = AsyncMock(
+            side_effect=RuntimeError("Jev API fail")
+        )
 
         ctx = HookContext(
             hook_name="on_message",
@@ -226,6 +255,38 @@ class TestChannelObserverPluginHooks:
         hooks = loaded_plugin.register_hooks()
         result, value = await hooks["on_message"](ctx)
         assert result == HookResult.SKIP
+
+    @pytest.mark.asyncio
+    async def test_judge_single_message_wires_jev_pipeline(
+        self, loaded_plugin, monkeypatch,
+    ):
+        import seosoyoung_plugins.channel_observer.plugin as plugin_module
+
+        loaded_plugin._jev_judge = MagicMock()
+        loaded_plugin._emoji_store = MagicMock()
+        loaded_plugin._store = MagicMock()
+        loaded_plugin._cooldown = MagicMock()
+        run_pipeline = AsyncMock()
+        monkeypatch.setattr(plugin_module, "run_message_jev_pipeline", run_pipeline)
+        event = {
+            "channel": "C_OBSERVE1",
+            "ts": "1",
+            "user": "U1",
+            "text": "hello",
+        }
+
+        await loaded_plugin._judge_single_message("C_OBSERVE1", event)
+
+        run_pipeline.assert_awaited_once()
+        kwargs = run_pipeline.await_args.kwargs
+        assert kwargs["channel_id"] == "C_OBSERVE1"
+        assert kwargs["event"] is event
+        assert kwargs["jev_judge"] is loaded_plugin._jev_judge
+        assert kwargs["emoji_store"] is loaded_plugin._emoji_store
+        assert kwargs["cooldown"] is loaded_plugin._cooldown
+        assert kwargs["store"] is loaded_plugin._store
+        assert kwargs["recent_bot_reactions"] is loaded_plugin._recent_bot_reactions["C_OBSERVE1"]
+        assert kwargs["intervention_threshold"] == loaded_plugin._intervention_threshold
 
     @pytest.mark.asyncio
     async def test_on_shutdown_stops_scheduler(self, loaded_plugin):
@@ -326,13 +387,16 @@ class TestChannelObserverStartup:
             assert "channel_observer" in value
             assert "channel_compressor" in value
             assert "channel_observer_channels" in value
+            assert "emoji_frequency_store" in value
+            assert "jev_judge" in value
             assert value["channel_observer_channels"] == [
                 "C_OBSERVE1",
                 "C_OBSERVE2",
             ]
 
-            # Scheduler should be started
-            mock_scheduler_cls.return_value.start.assert_called_once()
+            # Per-message judgments replace periodic collection.
+            mock_scheduler_cls.assert_not_called()
+            assert loaded_plugin._scheduler is None
 
 
 class TestChannelObserverAccessors:
@@ -375,16 +439,36 @@ class TestChannelObserverReaction:
     @pytest.mark.asyncio
     async def test_collect_reaction_delegates(self, loaded_plugin):
         mock_collector = MagicMock()
-        mock_collector.collect_reaction.return_value = True
+        mock_collector.collect_reaction.return_value = False
         loaded_plugin._collector = mock_collector
+        mock_emoji_store = MagicMock()
+        mock_emoji_store.record_reaction.return_value = True
+        loaded_plugin._emoji_store = mock_emoji_store
 
         event = {"reaction": "thumbsup", "item": {"channel": "C_OBSERVE1"}}
         result = loaded_plugin.collect_reaction(event, "added")
 
         assert result is True
+        mock_emoji_store.record_reaction.assert_called_once_with(
+            "thumbsup", "added", user_id=None, bot_user_id=None
+        )
         mock_collector.collect_reaction.assert_called_once_with(
             event, "added"
         )
+
+    @pytest.mark.asyncio
+    async def test_collect_reaction_ignores_non_message_items(self, loaded_plugin):
+        loaded_plugin._emoji_store = MagicMock()
+        loaded_plugin._collector = MagicMock()
+
+        result = loaded_plugin.collect_reaction(
+            {"reaction": "thumbsup", "item": {"channel": "C_OBSERVE1", "type": "file"}},
+            "added",
+        )
+
+        assert result is False
+        loaded_plugin._emoji_store.record_reaction.assert_not_called()
+        loaded_plugin._collector.collect_reaction.assert_not_called()
 
 
 class TestTriggerWordDetection:
@@ -494,56 +578,25 @@ class TestLlmCallCreation:
                 assert call_kwargs["prep_services"] is p._prep_services
 
     @pytest.mark.asyncio
-    async def test_llm_call_passed_to_scheduler(self):
-        """ChannelDigestScheduler에 llm_call이 전달됩니다."""
+    async def test_llm_call_passed_to_jev_pipeline(self):
+        """_judge_single_message에서 run_message_jev_pipeline에 llm_call이 전달됩니다."""
         p = ChannelObserverPlugin()
         await p.on_load(SAMPLE_CONFIG)
+        p._store = MagicMock()
+        p._cooldown = MagicMock()
+        p._emoji_store = MagicMock()
+        p._jev_judge = MagicMock()
 
-        import seosoyoung_plugins.channel_observer.store
-        import seosoyoung_plugins.channel_observer.collector
-        import seosoyoung_plugins.channel_observer.intervention
-        import seosoyoung_plugins.channel_observer.observer
-        import seosoyoung_plugins.channel_observer.scheduler
-
-        mock_scheduler_cls = MagicMock()
-
-        with (
-            patch(
-                "seosoyoung_plugins.channel_observer.store.ChannelStore",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.collector.ChannelMessageCollector",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.intervention.InterventionHistory",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.observer.ChannelObserver",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.observer.DigestCompressor",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.scheduler.ChannelDigestScheduler",
-                mock_scheduler_cls,
-            ),
-        ):
-            ctx = HookContext(
-                hook_name="on_startup",
-                args={
-                    "slack_client": MagicMock(),
-                    "mention_tracker": MagicMock(),
-                },
+        with patch(
+            "seosoyoung_plugins.channel_observer.plugin.run_message_jev_pipeline",
+            new_callable=AsyncMock,
+        ) as mock_jev_pipeline:
+            await p._judge_single_message(
+                "C_OBSERVE1",
+                {"channel": "C_OBSERVE1", "ts": "1", "user": "U1", "text": "hi"},
             )
-            hooks = p.register_hooks()
-            await hooks["on_startup"](ctx)
 
-            call_kwargs = mock_scheduler_cls.call_args.kwargs
+            call_kwargs = mock_jev_pipeline.call_args.kwargs
             assert "llm_call" in call_kwargs
             assert call_kwargs["llm_call"] is p._llm_call
             assert call_kwargs["prep_services"] is p._prep_services
