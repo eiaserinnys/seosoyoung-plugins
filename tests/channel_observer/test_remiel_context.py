@@ -430,24 +430,24 @@ class TestPluginRemielConfigPropagation:
         assert mock_pipeline.call_args.kwargs["remiel_config"] is p._remiel_config
 
     @pytest.mark.asyncio
-    async def test_plugin_passes_remiel_config_to_scheduler(self):
+    async def test_plugin_passes_remiel_config_to_jev_pipeline(self):
         p = ChannelObserverPlugin()
         await p.on_load({**SAMPLE_CONFIG, "remiel_base_url": "http://remiel.test", "remiel_api_key": "secret"})
-        mock_scheduler_cls = MagicMock()
+        p._store = MagicMock()
+        p._cooldown = MagicMock()
+        p._emoji_store = MagicMock()
+        p._jev_judge = MagicMock()
 
-        with (
-            pytest.MonkeyPatch.context() as mp,
-        ):
-            mp.setattr("seosoyoung_plugins.channel_observer.store.ChannelStore", MagicMock())
-            mp.setattr("seosoyoung_plugins.channel_observer.collector.ChannelMessageCollector", MagicMock())
-            mp.setattr("seosoyoung_plugins.channel_observer.intervention.InterventionHistory", MagicMock())
-            mp.setattr("seosoyoung_plugins.channel_observer.observer.ChannelObserver", MagicMock())
-            mp.setattr("seosoyoung_plugins.channel_observer.observer.DigestCompressor", MagicMock())
-            mp.setattr("seosoyoung_plugins.channel_observer.scheduler.ChannelDigestScheduler", mock_scheduler_cls)
+        with pytest.MonkeyPatch.context() as mp:
+            mock_jev_pipeline = AsyncMock()
+            mp.setattr(
+                "seosoyoung_plugins.channel_observer.plugin.run_message_jev_pipeline",
+                mock_jev_pipeline,
+            )
+            await p._judge_single_message(
+                "C_TEST",
+                {"channel": "C_TEST", "ts": "1", "user": "U1", "text": "hello"},
+            )
 
-            from seosoyoung.plugin_sdk import HookContext
-
-            hooks = p.register_hooks()
-            await hooks["on_startup"](HookContext(hook_name="on_startup", args={"slack_client": MagicMock()}))
-
-        assert mock_scheduler_cls.call_args.kwargs["remiel_config"] is p._remiel_config
+        assert mock_jev_pipeline.called
+        assert mock_jev_pipeline.call_args.kwargs["remiel_config"] is p._remiel_config

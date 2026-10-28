@@ -13,6 +13,7 @@ facade라 500줄을 초과한다. 준비 및 외부 wire의 세부 구현은 별
 """
 
 import asyncio
+import inspect
 import logging
 import math
 import os
@@ -20,14 +21,21 @@ import random
 import re
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from seosoyoung.plugin_sdk import mention, slack, soulstream
 from seosoyoung.plugin_sdk.caller_info import (
     build_bot_caller_info,
     get_host_preferred_node,
 )
-from seosoyoung.plugin_sdk.slack import Message
+from seosoyoung.plugin_sdk.slack import Message, get_thread_replies as _sdk_get_thread_replies
+from seosoyoung_plugins.channel_observer.collector import (
+    COLLECT_EXCLUDED_SUBTYPES,
+)
+from seosoyoung_plugins.channel_observer.emoji_frequency import (
+    EmojiFrequencyStore,
+    normalize_emoji_name,
+)
 from seosoyoung_plugins.channel_observer.intervention import (
     InterventionAction,
     InterventionHistory,
@@ -50,6 +58,10 @@ from seosoyoung_plugins.channel_observer.intervention_prep import (
     InterventionPrepServices,
     build_intervention_prep,
     run_and_name_session,
+)
+from seosoyoung_plugins.channel_observer.jev_judge import (
+    JevChannelJudge,
+    JevMessageVerdict,
 )
 from seosoyoung_plugins.channel_observer.observer import (
     ChannelObserver,
@@ -885,6 +897,340 @@ async def _no_intervene_memory() -> None:
     return None
 
 
+async def _fetch_latest_thread_replies(
+    channel_id: str, thread_root_ts: str, recent_messages_count: int,
+) -> list[Any]:
+    """Read the thread's pages and retain its root and recent replies."""
+    get_replies = slack.get_thread_replies
+    backend = slack.get_backend() if get_replies is _sdk_get_thread_replies else None
+    client = getattr(backend, "_client", None)
+    use_client = client is not None and hasattr(client, "conversations_replies")
+    try:
+        supports_cursor = "cursor" in inspect.signature(get_replies).parameters
+    except (TypeError, ValueError):
+        supports_cursor = False
+
+    if not use_client and not supports_cursor:
+        return await get_replies(
+            channel_id, thread_root_ts, limit=max(recent_messages_count, 200)
+        )
+
+    messages: list[Any] = []
+    cursor = None
+    for _ in range(20):
+        if use_client:
+            page = await asyncio.to_thread(
+                client.conversations_replies,
+                channel=channel_id, ts=thread_root_ts, limit=200, cursor=cursor,
+            )
+        else:
+            page = await get_replies(
+                channel_id, thread_root_ts,
+                limit=max(recent_messages_count, 200), cursor=cursor,
+            )
+        if isinstance(page, list):
+            messages.extend(page)
+            break
+        if isinstance(page, dict) or use_client:
+            messages.extend(page.get("messages", []))
+            cursor = (page.get("response_metadata") or {}).get("next_cursor")
+        else:
+            messages.extend(page.messages)
+            cursor = page.next_cursor
+        if not cursor:
+            break
+    else:
+        logger.warning("Jev 스레드 답글 조회가 페이지 상한에 도달했습니다 (%s, %s)", channel_id, thread_root_ts)
+
+    def message_ts(message: Any) -> str:
+        return str(message.get("ts", "") if isinstance(message, dict) else message.ts)
+
+    root = [message for message in messages if message_ts(message) == thread_root_ts]
+    replies = [message for message in messages if message_ts(message) != thread_root_ts]
+    return root[:1] + replies[-max(recent_messages_count * 4, 50):]
+
+
+async def run_message_jev_pipeline(
+    *,
+    channel_id: str,
+    event: dict,
+    jev_judge: JevChannelJudge,
+    emoji_store: EmojiFrequencyStore,
+    cooldown: InterventionHistory,
+    store: ChannelStore,
+    bot_user_id: str | None = None,
+    trigger_words: list[str] | None = None,
+    debug_channel: str = "",
+    recent_messages_count: int = 15,
+    emoji_candidate_limit: int = 30,
+    llm_call: Optional[Callable] = None,
+    intervene_model: str | None = None,
+    folder_id: str | None = None,
+    agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
+    recent_bot_reactions: dict[str, list[str]] | None = None,
+    **kwargs,
+) -> JevMessageVerdict | None:
+    """Judge and handle one newly received Slack message."""
+    subtype = event.get("subtype")
+    if subtype in COLLECT_EXCLUDED_SUBTYPES:
+        return None
+    if (
+        event.get("bot_id")
+        or not event.get("user")
+        or (bot_user_id and event.get("user") == bot_user_id)
+    ):
+        return None
+
+    text = (event.get("text") or "").strip()
+    ts = str(event.get("ts") or "").strip()
+    if not text or not ts:
+        return None
+    thread_ts = event.get("thread_ts")
+
+    mention_backend = mention.get_backend()
+    if bot_user_id and f"<@{bot_user_id}>" in text and mention_backend is not None:
+        mention.mark(thread_ts or ts)
+        return None
+    if mention_backend is not None:
+        if (thread_ts and mention.is_handled(thread_ts)) or mention.is_handled(ts):
+            return None
+
+    history_loaded = False
+    try:
+        history = await slack.get_channel_history(
+            channel_id, limit=recent_messages_count
+        )
+        history_loaded = True
+    except Exception as error:
+        logger.warning("Jev 최근 메시지 조회 실패 (%s): %s", channel_id, error)
+        history = []
+
+    if history_loaded:
+        emoji_store.seed_from_messages(
+            channel_id, history, bot_user_id=bot_user_id
+        )
+
+    thread_root_ts = str(thread_ts or "").strip()
+    is_thread_reply = bool(thread_root_ts and thread_root_ts != ts)
+    thread_history: list[Any] = []
+    if is_thread_reply:
+        try:
+            thread_history = await _fetch_latest_thread_replies(
+                channel_id, thread_root_ts, recent_messages_count,
+            )
+        except Exception as error:
+            logger.warning(
+                "Jev 스레드 답글 조회 실패 (%s, %s): %s",
+                channel_id,
+                thread_root_ts,
+                error,
+            )
+            thread_history = []
+
+    channel_reactions = (
+        recent_bot_reactions if recent_bot_reactions is not None else {}
+    )
+
+    def _to_jev_message_dict(
+        message: Any, *, default_thread_ts: str | None = None
+    ) -> dict[str, Any]:
+        def field(value: Any, name: str, default: Any = None) -> Any:
+            return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+        message_ts = str(field(message, "ts") or "")
+        reactions = field(message, "reactions") or []
+        msg_reactions = []
+        msg_bot_reactions = []
+        for reaction in reactions:
+            name = reaction if isinstance(reaction, str) else field(reaction, "name", "")
+            if not name:
+                continue
+            normalized = normalize_emoji_name(name)
+            msg_reactions.append(normalized)
+            if bot_user_id and bot_user_id in (field(reaction, "users") or []):
+                msg_bot_reactions.append(normalized)
+        for emoji in field(message, "bot_reactions", []) or []:
+            normalized = normalize_emoji_name(emoji)
+            if normalized and normalized not in msg_bot_reactions:
+                msg_bot_reactions.append(normalized)
+        for emoji in channel_reactions.get(message_ts, []):
+            normalized = normalize_emoji_name(emoji)
+            if normalized and normalized not in msg_reactions:
+                msg_reactions.append(normalized)
+            if normalized and normalized not in msg_bot_reactions:
+                msg_bot_reactions.append(normalized)
+        return {
+            "ts": message_ts,
+            "user": field(message, "user"),
+            "text": field(message, "text") or "",
+            "thread_ts": field(message, "thread_ts") or default_thread_ts,
+            "reactions": msg_reactions,
+            "bot_reactions": msg_bot_reactions,
+        }
+
+    def _ts_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+        raw_ts = str(item.get("ts") or "")
+        try:
+            return (0, float(raw_ts), raw_ts)
+        except ValueError:
+            return (1, 0.0, raw_ts)
+
+    merged_by_ts: dict[str, dict[str, Any]] = {}
+    for message in reversed(history):
+        item = _to_jev_message_dict(message)
+        if item["ts"] and item["ts"] != ts:
+            merged_by_ts[item["ts"]] = item
+
+    thread_replies_by_ts: dict[str, dict[str, Any]] = {}
+    for message in thread_history:
+        item = _to_jev_message_dict(message, default_thread_ts=thread_root_ts)
+        if not item["ts"]:
+            continue
+        if item["ts"] != ts:
+            merged_by_ts[item["ts"]] = item
+        if item["ts"] != thread_root_ts:
+            thread_replies_by_ts[item["ts"]] = item
+
+    target_message = {
+        "ts": ts,
+        "user": event["user"],
+        "text": text,
+        "thread_ts": thread_ts,
+    }
+    if is_thread_reply:
+        if store is not None:
+            for message in store.load_thread_buffer(channel_id, thread_root_ts):
+                item = _to_jev_message_dict(message, default_thread_ts=thread_root_ts)
+                if item["ts"] and item["ts"] != thread_root_ts:
+                    thread_replies_by_ts.setdefault(item["ts"], item)
+                    if item["ts"] != ts:
+                        merged_by_ts.setdefault(item["ts"], item)
+            store.upsert_thread_message(channel_id, thread_root_ts, target_message)
+        thread_replies_by_ts[ts] = dict(target_message)
+        root_key = _ts_sort_key({"ts": thread_root_ts})
+        current_key = _ts_sort_key({"ts": ts})
+        for reaction_ts in channel_reactions:
+            reaction_key = _ts_sort_key({"ts": reaction_ts})
+            if root_key < reaction_key < current_key and reaction_ts not in merged_by_ts:
+                merged_by_ts[reaction_ts] = _to_jev_message_dict(
+                    {"ts": reaction_ts}, default_thread_ts=thread_root_ts,
+                )
+
+    thread_reply_dicts = sorted(thread_replies_by_ts.values(), key=_ts_sort_key)
+    recent_messages = sorted(merged_by_ts.values(), key=_ts_sort_key)[
+        -recent_messages_count:
+    ]
+
+    text_lower = text.lower()
+    matched_triggers = [
+        word for word in (trigger_words or []) if word.lower() in text_lower
+    ]
+    candidates = emoji_store.get_top_candidates(limit=emoji_candidate_limit)
+    verdict = await jev_judge.judge_message(
+        channel_id=channel_id,
+        target_message=target_message,
+        recent_messages=recent_messages,
+        emoji_candidates=candidates,
+        trigger_words_matched=matched_triggers,
+        bot_user_id=bot_user_id,
+    )
+    if verdict is None:
+        return None
+
+    if verdict.should_react and verdict.selected_emoji:
+        already_bot_emojis = channel_reactions.get(ts, [])
+        if verdict.selected_emoji not in already_bot_emojis:
+            try:
+                reaction_result = await slack.add_reaction(
+                    channel=channel_id,
+                    ts=ts,
+                    emoji=verdict.selected_emoji,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Jev 이모지 리액션 실패 (%s, %s): %s",
+                    channel_id,
+                    ts,
+                    error,
+                )
+            else:
+                if (
+                    recent_bot_reactions is not None
+                    and getattr(reaction_result, "ok", True) is not False
+                ):
+                    if (
+                        ts not in recent_bot_reactions
+                        and len(recent_bot_reactions) >= 100
+                    ):
+                        oldest_ts = next(iter(recent_bot_reactions))
+                        recent_bot_reactions.pop(oldest_ts)
+                    bot_emojis = recent_bot_reactions.setdefault(ts, [])
+                    if verdict.selected_emoji not in bot_emojis:
+                        bot_emojis.append(verdict.selected_emoji)
+
+    if verdict.should_intervene:
+        force_intervene = bool(matched_triggers)
+        importance_equiv = max(
+            1, min(10, round(verdict.intervene_score * 10))
+        )
+        prob = cooldown.burst_probability(channel_id, importance_equiv)
+        mins_since = cooldown.minutes_since_last(channel_id)
+        BURST_GAP = 5
+        if force_intervene:
+            passed = True
+        elif mins_since <= BURST_GAP:
+            passed = prob >= 0.35
+        else:
+            passed = (
+                verdict.intervene_score * prob
+            ) >= kwargs.get("intervention_threshold", 0.18)
+
+        if passed:
+            reply_target = thread_root_ts or ts
+            action = InterventionAction(
+                type="message",
+                target=reply_target,
+                content=f"jev_intervene={verdict.intervene_score:.2f}",
+            )
+            context_messages = [*recent_messages, target_message]
+            forwarded_kwargs = dict(kwargs)
+            if is_thread_reply:
+                existing_reply_ts = {
+                    str(reply.get("ts") or "") for reply in thread_reply_dicts
+                }
+                if ts not in existing_reply_ts:
+                    thread_reply_dicts.append(dict(target_message))
+                merged_thread_buffers = dict(
+                    forwarded_kwargs.get("thread_buffers") or {}
+                )
+                merged_thread_buffers[thread_root_ts] = thread_reply_dicts
+                forwarded_kwargs["thread_buffers"] = merged_thread_buffers
+            if llm_call:
+                await _execute_intervene(
+                    store=store,
+                    channel_id=channel_id,
+                    action=action,
+                    pending_messages=context_messages,
+                    observer_reason=action.content,
+                    llm_call=llm_call,
+                    bot_user_id=bot_user_id,
+                    recent_messages_count=recent_messages_count,
+                    intervene_model=intervene_model,
+                    folder_id=folder_id,
+                    agent_id=agent_id,
+                    remiel_config=remiel_config,
+                    prep_services=prep_services,
+                    **forwarded_kwargs,
+                )
+            else:
+                await execute_interventions(channel_id, [action])
+            cooldown.record(channel_id)
+
+    return verdict
+
+
 async def _execute_intervene(
     store: ChannelStore,
     channel_id: str,
@@ -947,7 +1293,20 @@ async def _execute_intervene(
                 if trigger_message is not None:
                     break
 
-        # 어디에서도 못 찾으면 intervention 스킵
+        if trigger_message is None:
+            if all_context:
+                trigger_message = all_context[-1]
+                recent_messages = all_context[-(recent_messages_count + 1):-1]
+            elif thread_buffers:
+                thread_messages = thread_buffers.get(target_ts) or [
+                    message
+                    for messages in thread_buffers.values()
+                    for message in messages
+                ]
+                if thread_messages:
+                    trigger_message = thread_messages[-1]
+                    recent_messages = thread_messages[-(recent_messages_count + 1):-1]
+
         if trigger_message is None:
             logger.warning(
                 f"intervene 스킵: target_ts={target_ts}를 "

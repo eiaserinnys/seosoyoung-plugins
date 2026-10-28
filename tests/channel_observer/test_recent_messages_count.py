@@ -72,48 +72,26 @@ class TestPluginConfigRecentMessagesCount:
                 assert call_kwargs["recent_messages_count"] == 20
 
     @pytest.mark.asyncio
-    async def test_value_propagated_to_scheduler(self):
-        """recent_messages_count should be passed to ChannelDigestScheduler."""
+    async def test_value_propagated_to_jev_pipeline(self):
+        """recent_messages_count should be passed to run_message_jev_pipeline."""
         config = {**SAMPLE_CONFIG, "recent_messages_count": 12}
         p = ChannelObserverPlugin()
         await p.on_load(config)
+        p._store = MagicMock()
+        p._cooldown = MagicMock()
+        p._emoji_store = MagicMock()
+        p._jev_judge = MagicMock()
 
-        mock_scheduler_cls = MagicMock()
-        with (
-            patch(
-                "seosoyoung_plugins.channel_observer.store.ChannelStore",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.collector.ChannelMessageCollector",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.intervention.InterventionHistory",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.observer.ChannelObserver",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.observer.DigestCompressor",
-                MagicMock(),
-            ),
-            patch(
-                "seosoyoung_plugins.channel_observer.scheduler.ChannelDigestScheduler",
-                mock_scheduler_cls,
-            ),
-        ):
-            from seosoyoung.plugin_sdk import HookContext
-            ctx = HookContext(
-                hook_name="on_startup",
-                args={"slack_client": MagicMock()},
+        with patch(
+            "seosoyoung_plugins.channel_observer.plugin.run_message_jev_pipeline",
+            new_callable=AsyncMock,
+        ) as mock_jev_pipeline:
+            await p._judge_single_message(
+                "C_TEST",
+                {"channel": "C_TEST", "ts": "1", "user": "U1", "text": "hello"},
             )
-            hooks = p.register_hooks()
-            await hooks["on_startup"](ctx)
 
-            call_kwargs = mock_scheduler_cls.call_args.kwargs
+            call_kwargs = mock_jev_pipeline.call_args.kwargs
             assert "recent_messages_count" in call_kwargs
             assert call_kwargs["recent_messages_count"] == 12
 
