@@ -313,7 +313,7 @@ async def test_jev_judge_suppresses_dense_reactions_and_replaces_repeat(monkeypa
         emoji_candidates={"laughing": "웃음", "clap": "박수"},
     )
     assert verdict.should_react is True
-    assert verdict.selected_emoji == "clap"
+    assert verdict.selected_emoji == "laughing"
     assert verdict.suppressed_by_density is False
 
 
@@ -338,6 +338,7 @@ async def test_jev_judge_uses_lower_intervene_threshold_for_trigger(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_message_pipeline_reacts_and_runs_intervention(monkeypatch, mock_plugin_sdk):
+    from seosoyoung.plugin_sdk.slack import ReactionResult
     from seosoyoung_plugins.channel_observer import pipeline
     from seosoyoung_plugins.channel_observer.emoji_frequency import EmojiFrequencyStore
     from seosoyoung_plugins.channel_observer.jev_judge import JevMessageVerdict
@@ -365,9 +366,15 @@ async def test_message_pipeline_reacts_and_runs_intervention(monkeypatch, mock_p
         pipeline.slack,
         "get_channel_history",
         AsyncMock(return_value=[
-            Message("3", "U3", "대상"),
-            Message("2", "U2", "이전", reactions=[Reaction("eyes", users=["UBOT"])]),
-            Message("1", "U1", "더 이전"),
+            Message("1", "U1", "스레드 루트"),
+        ]),
+    )
+    monkeypatch.setattr(
+        pipeline.slack,
+        "get_thread_replies",
+        AsyncMock(return_value=[
+            Message("1", "U1", "스레드 루트"),
+            Message("2", "U2", "이전 답글", thread_ts="1", reactions=[Reaction("eyes", users=["UBOT"])]),
         ]),
     )
     recent_bot_reactions = {f"old-{index}": [] for index in range(99)}
@@ -399,8 +406,27 @@ async def test_message_pipeline_reacts_and_runs_intervention(monkeypatch, mock_p
     assert "old-0" not in recent_bot_reactions
     assert recent_bot_reactions["3"] == ["laughing"]
     intervention.assert_awaited_once()
-    assert intervention.await_args.kwargs["action"].target == "1"
+    intervene_kwargs = intervention.await_args.kwargs
+    assert intervene_kwargs["action"].target == "1"
+    assert [m["ts"] for m in intervene_kwargs["thread_buffers"]["1"]] == ["2", "3"]
+    assert intervene_kwargs["thread_buffers"]["1"][-1]["text"] == "안녕 서소영"
     cooldown.record.assert_called_once_with("C1")
+
+    mock_plugin_sdk["slack"].add_reaction = AsyncMock(
+        return_value=ReactionResult(ok=False, error="failed")
+    )
+    failed_reactions: dict[str, list[str]] = {}
+    await pipeline.run_message_jev_pipeline(
+        channel_id="C1",
+        event={"channel": "C1", "ts": "4", "user": "U3", "text": "반가워"},
+        jev_judge=judge,
+        emoji_store=emoji_store,
+        cooldown=cooldown,
+        store=store,
+        bot_user_id="UBOT",
+        recent_bot_reactions=failed_reactions,
+    )
+    assert "4" not in failed_reactions
 
 
 @pytest.mark.asyncio

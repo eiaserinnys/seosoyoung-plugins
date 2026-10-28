@@ -211,24 +211,6 @@ class JevChannelJudge:
                 and react_score >= effective_emoji_threshold
                 and bool(choice)
             )
-            if should_react and choice == density["last_bot_emoji"]:
-                alternatives = [
-                    (emoji, probability)
-                    for emoji, probability in probabilities.items()
-                    if emoji != choice
-                ]
-                if alternatives:
-                    alt_emoji, alt_probability = max(
-                        alternatives, key=lambda item: item[1]
-                    )
-                else:
-                    alt_emoji, alt_probability = None, 0.0
-                if alt_probability >= 0.15:
-                    choice = alt_emoji
-                else:
-                    should_react = False
-                    suppressed_by_density = True
-
             effective_intervene_threshold = (
                 self.trigger_intervene_threshold
                 if trigger_words_matched

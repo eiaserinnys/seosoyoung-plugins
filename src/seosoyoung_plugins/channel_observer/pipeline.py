@@ -20,7 +20,7 @@ import random
 import re
 import time
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from seosoyoung.plugin_sdk import mention, slack, soulstream
 from seosoyoung.plugin_sdk.caller_info import (
@@ -957,14 +957,34 @@ async def run_message_jev_pipeline(
         emoji_store.seed_from_messages(
             channel_id, history, bot_user_id=bot_user_id
         )
+
+    thread_root_ts = str(thread_ts or "").strip()
+    is_thread_reply = bool(thread_root_ts and thread_root_ts != ts)
+    thread_history: list[Any] = []
+    if is_thread_reply:
+        try:
+            thread_history = await slack.get_thread_replies(
+                channel_id,
+                thread_root_ts,
+                limit=max(recent_messages_count, 20),
+            )
+        except Exception as error:
+            logger.warning(
+                "Jev 스레드 답글 조회 실패 (%s, %s): %s",
+                channel_id,
+                thread_root_ts,
+                error,
+            )
+            thread_history = []
+
     channel_reactions = (
         recent_bot_reactions if recent_bot_reactions is not None else {}
     )
-    recent_messages: list[dict] = []
-    for message in reversed(history):
+
+    def _to_jev_message_dict(
+        message: Any, *, default_thread_ts: str | None = None
+    ) -> dict[str, Any]:
         message_ts = str(getattr(message, "ts", "") or "")
-        if message_ts == ts:
-            continue
         reactions = getattr(message, "reactions", None) or []
         msg_reactions = [
             normalize_emoji_name(reaction.name)
@@ -986,15 +1006,41 @@ async def run_message_jev_pipeline(
                 msg_reactions.append(normalized)
             if normalized and normalized not in msg_bot_reactions:
                 msg_bot_reactions.append(normalized)
-        recent_messages.append(
-            {
-                "ts": message_ts,
-                "user": getattr(message, "user", None),
-                "text": getattr(message, "text", None) or "",
-                "reactions": msg_reactions,
-                "bot_reactions": msg_bot_reactions,
-            }
-        )
+        return {
+            "ts": message_ts,
+            "user": getattr(message, "user", None),
+            "text": getattr(message, "text", None) or "",
+            "thread_ts": getattr(message, "thread_ts", None) or default_thread_ts,
+            "reactions": msg_reactions,
+            "bot_reactions": msg_bot_reactions,
+        }
+
+    def _ts_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+        raw_ts = str(item.get("ts") or "")
+        try:
+            return (0, float(raw_ts), raw_ts)
+        except ValueError:
+            return (1, 0.0, raw_ts)
+
+    merged_by_ts: dict[str, dict[str, Any]] = {}
+    for message in reversed(history):
+        item = _to_jev_message_dict(message)
+        if item["ts"] and item["ts"] != ts:
+            merged_by_ts[item["ts"]] = item
+
+    thread_reply_dicts: list[dict[str, Any]] = []
+    for message in thread_history:
+        item = _to_jev_message_dict(message, default_thread_ts=thread_root_ts)
+        if not item["ts"]:
+            continue
+        if item["ts"] != ts:
+            merged_by_ts[item["ts"]] = item
+        if item["ts"] != thread_root_ts:
+            thread_reply_dicts.append(item)
+
+    recent_messages = sorted(merged_by_ts.values(), key=_ts_sort_key)[
+        -recent_messages_count:
+    ]
 
     target_message = {
         "ts": ts,
@@ -1022,7 +1068,7 @@ async def run_message_jev_pipeline(
         already_bot_emojis = channel_reactions.get(ts, [])
         if verdict.selected_emoji not in already_bot_emojis:
             try:
-                await slack.add_reaction(
+                reaction_result = await slack.add_reaction(
                     channel=channel_id,
                     ts=ts,
                     emoji=verdict.selected_emoji,
@@ -1035,7 +1081,10 @@ async def run_message_jev_pipeline(
                     error,
                 )
             else:
-                if recent_bot_reactions is not None:
+                if (
+                    recent_bot_reactions is not None
+                    and getattr(reaction_result, "ok", True) is not False
+                ):
                     if (
                         ts not in recent_bot_reactions
                         and len(recent_bot_reactions) >= 100
@@ -1064,13 +1113,25 @@ async def run_message_jev_pipeline(
             ) >= kwargs.get("intervention_threshold", 0.18)
 
         if passed:
-            reply_target = thread_ts or ts
+            reply_target = thread_root_ts or ts
             action = InterventionAction(
                 type="message",
                 target=reply_target,
                 content=f"jev_intervene={verdict.intervene_score:.2f}",
             )
             context_messages = [*recent_messages, target_message]
+            forwarded_kwargs = dict(kwargs)
+            if is_thread_reply:
+                existing_reply_ts = {
+                    str(reply.get("ts") or "") for reply in thread_reply_dicts
+                }
+                if ts not in existing_reply_ts:
+                    thread_reply_dicts.append(dict(target_message))
+                merged_thread_buffers = dict(
+                    forwarded_kwargs.get("thread_buffers") or {}
+                )
+                merged_thread_buffers[thread_root_ts] = thread_reply_dicts
+                forwarded_kwargs["thread_buffers"] = merged_thread_buffers
             if llm_call:
                 await _execute_intervene(
                     store=store,
@@ -1086,7 +1147,7 @@ async def run_message_jev_pipeline(
                     agent_id=agent_id,
                     remiel_config=remiel_config,
                     prep_services=prep_services,
-                    **kwargs,
+                    **forwarded_kwargs,
                 )
             else:
                 await execute_interventions(channel_id, [action])
