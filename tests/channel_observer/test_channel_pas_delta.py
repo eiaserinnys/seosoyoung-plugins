@@ -86,6 +86,7 @@ async def test_silence_advances_read_watermarks_without_posting(
     assert state["last_posted_ts"] is None
     assert store.load_pending("C001") == []
     assert [item["ts"] for item in store.load_judged("C001")] == ["10.2"]
+    assert ensure_pas.await_args.kwargs["channel_id"] == "C001"
     assert run.await_args.kwargs["session_id"] == "pas-C001"
     assert run.await_args.kwargs["use_persistent_session"] is True
     assert run.await_args.kwargs["agent_id"] == "seosoyoung-intervene"

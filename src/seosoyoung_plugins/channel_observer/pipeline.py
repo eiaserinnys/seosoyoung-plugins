@@ -1655,13 +1655,20 @@ async def _execute_intervene_locked(
     pas_fallback_models = kwargs.get("pas_fallback_models") or DEFAULT_CHANNEL_PAS_FALLBACK_MODELS
     pas_folder_id = kwargs.get("pas_folder_id", folder_id)
     if ensure_channel_pas is not None:
-        pas_session_id = await ensure_channel_pas(
+        pas_session_id = await _call_with_supported_kwargs(
+            ensure_channel_pas,
+            channel_id=channel_id,
             agent_id="seosoyoung-intervene",
             folder_id=pas_folder_id,
             default_model=pas_default_model,
             fallback_models=pas_fallback_models,
             session_id=pas_state.get("session_id"),
             display_name=f"💬 채널개입 PAS: #{kwargs.get('channel_name') or channel_id}",
+            caller_info=build_bot_caller_info(
+                source="channel_observer",
+                display_name="채널 관찰자",
+                agent_node=get_host_preferred_node(),
+            ),
         )
         if isinstance(pas_session_id, dict):
             pas_session_id = pas_session_id.get("session_id")
