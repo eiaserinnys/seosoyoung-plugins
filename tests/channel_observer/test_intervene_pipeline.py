@@ -182,7 +182,10 @@ async def test_context_order_and_participant_ids(mock_plugin_sdk, monkeypatch, t
     assert memory.member_calls == [("C_TEST", ["U1", "U2", "U4"])]
     prep_kwargs = prep_builder.await_args.kwargs
     assert prep_kwargs["slug"]
-    assert prep_kwargs["thread_context"].startswith("[C_TEST:1]")
+    assert prep_kwargs["thread_context"].startswith("[C_TEST:3] <U2>: 트리거")
+    assert "  [C_TEST:1] <U1>: 앞선" in prep_kwargs["thread_context"]
+    assert "  [C_TEST:10] <U4>: 답글" in prep_kwargs["thread_context"]
+    assert remiel_builder.await_args.kwargs["timestamps"] == ["3"]
 
 
 @pytest.mark.asyncio

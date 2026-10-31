@@ -13,7 +13,9 @@ facade라 500줄을 초과한다. 준비 및 외부 wire의 세부 구현은 별
 """
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -81,6 +83,282 @@ from seosoyoung_plugins.channel_observer.store import ChannelStore
 from seosoyoung_plugins.memory.token_counter import TokenCounter
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CHANNEL_PAS_MODEL = {
+    "model_preset": "gemini-4-argon",
+    "reasoning_effort": "medium",
+    "node_id": "eias-linegames-wsl",
+}
+DEFAULT_CHANNEL_PAS_FALLBACK_MODELS = [
+    {
+        "model_preset": "claude-opus",
+        "reasoning_effort": "medium",
+        "node_id": "eias-linegames-wsl",
+    },
+    {
+        "model_preset": "codex-6.1-sol",
+        "reasoning_effort": "medium",
+        "node_id": "eias-linegames",
+    },
+]
+
+
+async def _call_with_supported_kwargs(function: Callable, **kwargs):
+    """구형 테스트 mock과 이전 backend가 모르는 키워드 인자를 받지 않게 합니다."""
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        accepted = kwargs
+    else:
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
+            accepted = kwargs
+        else:
+            accepted = {key: value for key, value in kwargs.items() if key in signature.parameters}
+    return await function(**accepted)
+
+
+def _ts_sort_key(message: dict[str, Any] | str) -> tuple[int, float, str]:
+    raw_ts = str(message.get("ts") or "") if isinstance(message, dict) else str(message or "")
+    try:
+        return (0, float(raw_ts), raw_ts)
+    except ValueError:
+        return (1, 0.0, raw_ts)
+
+
+def _pas_message_dict(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return dict(message)
+    return {
+        "ts": str(getattr(message, "ts", "") or ""),
+        "user": getattr(message, "user", None),
+        "text": getattr(message, "text", "") or "",
+        "thread_ts": getattr(message, "thread_ts", None),
+        "bot_id": getattr(message, "bot_id", None),
+    }
+
+
+async def _build_channel_pas_delta(
+    *,
+    store: ChannelStore,
+    channel_id: str,
+    pas_state: dict[str, Any],
+    target_ts: str | None,
+    target_message: dict[str, Any] | None,
+    current_thread_ts: str | None,
+    pending_messages: list[dict[str, Any]],
+    thread_buffers: dict[str, list[dict]] | None,
+    bot_user_id: str | None,
+    recent_messages_count: int,
+    judgment_reason: str | None,
+    buffer_threshold: int,
+    compressor: Any = None,
+) -> dict[str, Any]:
+    """읽음 커서 이후 채널 메시지와 스레드 답글을 시간순 Delta로 묶습니다."""
+    read_ts = str(pas_state.get("read_ts") or "")
+    read_thread_ts_map = dict(pas_state.get("read_thread_ts_map") or {})
+    try:
+        history_raw = await slack.get_channel_history(
+            channel_id, limit=max(recent_messages_count, 1)
+        )
+    except Exception as error:
+        logger.warning("PAS Delta 최근 이력 조회 실패 (%s): %s", channel_id, error)
+        history_raw = []
+
+    roots_by_ts: dict[str, dict[str, Any]] = {}
+    reply_candidates: dict[str, dict[str, dict[str, Any]]] = {}
+    for source in (
+        store.load_pending(channel_id),
+        store.load_judged(channel_id),
+        pending_messages,
+        [_pas_message_dict(item) for item in history_raw],
+        [target_message] if target_message else [],
+    ):
+        for raw in source:
+            message = _pas_message_dict(raw)
+            ts = str(message.get("ts") or "")
+            if not ts:
+                continue
+            thread_ts = str(message.get("thread_ts") or "")
+            is_reply = bool(thread_ts and thread_ts != ts)
+            if is_reply:
+                reply_candidates.setdefault(thread_ts, {})[ts] = message
+                continue
+            if message.get("bot_id") or (
+                bot_user_id and message.get("user") == bot_user_id
+            ):
+                continue
+            roots_by_ts[ts] = {**roots_by_ts.get(ts, {}), **message}
+
+    if read_ts:
+        root_delta = [
+            message for ts, message in roots_by_ts.items()
+            if _ts_sort_key(ts) > _ts_sort_key(read_ts)
+        ]
+    else:
+        history_ts = {
+            str(message.get("ts") or "")
+            for message in [_pas_message_dict(item) for item in history_raw]
+            if message.get("ts")
+        }
+        latest_history = sorted(
+            (message for ts, message in roots_by_ts.items() if ts in history_ts),
+            key=_ts_sort_key,
+        )[-recent_messages_count:]
+        recent_ts = {str(message.get("ts")) for message in latest_history}
+        pending_ts = {
+            str(message.get("ts") or "")
+            for message in [*store.load_pending(channel_id), *pending_messages]
+            if message.get("ts")
+        }
+        root_delta = [
+            message for ts, message in roots_by_ts.items()
+            if ts in recent_ts or ts in pending_ts
+        ]
+    root_delta.sort(key=_ts_sort_key)
+
+    if inspect.getattr_static(store, "load_all_buffered_threads", None) is not None:
+        reply_sources = store.load_all_buffered_threads(channel_id)
+    elif inspect.getattr_static(store, "load_all_thread_buffers", None) is not None:
+        reply_sources = store.load_all_thread_buffers(channel_id)
+    else:
+        reply_sources = {}
+    if not isinstance(reply_sources, dict):
+        reply_sources = {}
+    for thread_ts, messages_by_ts in reply_candidates.items():
+        existing = {str(message.get("ts") or ""): message for message in reply_sources.get(thread_ts, [])}
+        existing.update(messages_by_ts)
+        reply_sources[thread_ts] = list(existing.values())
+    buffered_thread_ts = {str(current_thread_ts)} if current_thread_ts else set()
+    if target_ts and thread_buffers and target_ts in thread_buffers:
+        buffered_thread_ts.add(str(target_ts))
+    if thread_buffers:
+        buffered_thread_ts.update(
+            thread_ts
+            for thread_ts in reply_candidates
+            if thread_ts in thread_buffers
+        )
+    selected_buffers = {
+        thread_ts: thread_buffers.get(thread_ts, [])
+        for thread_ts in buffered_thread_ts
+    } if thread_buffers else {}
+    for thread_ts, messages in selected_buffers.items():
+        current = reply_sources.setdefault(str(thread_ts), [])
+        by_ts = {str(message.get("ts") or ""): message for message in current}
+        for message in messages:
+            ts = str(message.get("ts") or "")
+            if ts:
+                by_ts[ts] = {**by_ts.get(ts, {}), **message}
+        reply_sources[str(thread_ts)] = list(by_ts.values())
+
+    reply_delta: dict[str, list[dict[str, Any]]] = {}
+    for thread_ts, messages in reply_sources.items():
+        cursor = str(read_thread_ts_map.get(thread_ts) or read_ts)
+        selected = []
+        for raw in messages:
+            message = _pas_message_dict(raw)
+            ts = str(message.get("ts") or "")
+            if not ts or (cursor and _ts_sort_key(ts) <= _ts_sort_key(cursor)):
+                continue
+            if message.get("bot_id") or (
+                bot_user_id and message.get("user") == bot_user_id
+            ):
+                continue
+            selected.append(message)
+        if selected:
+            reply_delta[thread_ts] = sorted(selected, key=_ts_sort_key)
+
+    if not root_delta and not reply_delta:
+        return {"empty": True}
+
+    resolver = _make_resolver()
+
+    def format_message(message: dict[str, Any]) -> str:
+        user_id = str(message.get("user") or "unknown")
+        display_name = resolver.resolve(user_id) if resolver else None
+        speaker = (
+            display_name
+            if display_name and (user_id in display_name or display_name == user_id)
+            else f"{display_name} ({user_id})" if display_name else user_id
+        )
+        return f"[{channel_id}:{message.get('ts')}] <{speaker}>: {message.get('text') or ''}"
+
+    lines = [format_message(message) for message in root_delta]
+    roots_by_ts_full = dict(roots_by_ts)
+    if target_message:
+        roots_by_ts_full[str(target_message.get("ts") or "")] = target_message
+    if reply_delta:
+        lines.append("## 스레드 답글")
+        for thread_ts in sorted(reply_delta, key=_ts_sort_key):
+            root = roots_by_ts_full.get(thread_ts, {})
+            lines.append(
+                f"### [{channel_id}:{thread_ts}] 스레드 "
+                f"(원문: {root.get('text') or '원문 없음'})"
+            )
+            lines.extend(
+                f"  {format_message(reply)}" for reply in reply_delta[thread_ts]
+            )
+
+    target_label = target_ts or (
+        str(target_message.get("ts")) if target_message else
+        (str(max(root_delta, key=_ts_sort_key).get("ts")) if root_delta else "")
+    )
+    lines.append(f"이번 개입 트리거: [{channel_id}:{target_label}]")
+    lines.append(f"Jev 판단 사유: {judgment_reason or '(없음)'}")
+    delta_text = "\n".join(lines)
+    messages_for_snapshot = [*root_delta, *(item for group in reply_delta.values() for item in group)]
+    messages_for_snapshot.sort(key=_ts_sort_key)
+    if TokenCounter().count_string(delta_text) > buffer_threshold and len(messages_for_snapshot) > recent_messages_count:
+        keep = set(id(item) for item in messages_for_snapshot[-recent_messages_count:])
+        older_text = "\n".join(
+            format_message(item) for item in messages_for_snapshot if id(item) not in keep
+        )
+        compressed = None
+        if compressor is not None:
+            try:
+                compressed = await compressor.compress(
+                    digest=older_text,
+                    target_tokens=max(buffer_threshold // 2, 1),
+                )
+            except Exception as error:
+                logger.warning("PAS Delta 압축 실패 (%s): %s", channel_id, error)
+        if compressed:
+            summary = compressed.digest if hasattr(compressed, "digest") else str(compressed)
+        else:
+            summary = f"이전 대화 {len(messages_for_snapshot) - recent_messages_count}건은 생략했습니다."
+        recent_text = "\n".join(format_message(item) for item in messages_for_snapshot[-recent_messages_count:])
+        delta_text = f"## 이전 대화 요약\n{summary}\n## 최근 대화\n{recent_text}\n" + "\n".join(lines[-2:])
+
+    snapshot_ts = {str(message.get("ts")) for message in root_delta if message.get("ts")}
+    snapshot_thread_msg_ts = {
+        thread_ts: {str(message.get("ts")) for message in messages if message.get("ts")}
+        for thread_ts, messages in reply_delta.items()
+    }
+    snapshot_thread_ts = set(snapshot_thread_msg_ts)
+    all_ts = [*snapshot_ts, *(ts for values in snapshot_thread_msg_ts.values() for ts in values)]
+    batch_payload = {
+        "channel_id": channel_id,
+        "root_ts": max(snapshot_ts, key=_ts_sort_key) if snapshot_ts else "",
+        "thread_ts": {
+            key: max(value, key=_ts_sort_key)
+            for key, value in sorted(snapshot_thread_msg_ts.items()) if value
+        },
+        "target_ts": target_label,
+    }
+    digest = hashlib.sha1(
+        json.dumps(batch_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "empty": False,
+        "text": delta_text,
+        "roots": root_delta,
+        "replies": reply_delta,
+        "messages": messages_for_snapshot,
+        "snapshot_ts": snapshot_ts,
+        "snapshot_thread_ts": snapshot_thread_ts,
+        "snapshot_thread_msg_ts": snapshot_thread_msg_ts,
+        "batch_id": f"chan-pas-{channel_id}-{digest}",
+        "target_ts": target_label,
+    }
 
 
 def _intervention_thinking_emoji() -> str:
@@ -332,9 +610,13 @@ async def run_channel_pipeline(
     llm_call: Optional[Callable] = None,
     bot_user_id: str | None = None,
     recent_messages_count: int = 5,
+    buffer_threshold: int = 150,
     intervene_model: str | None = None,
     folder_id: str | None = None,
     agent_id: str | None = None,
+    pas_default_model: dict[str, Any] | None = None,
+    pas_fallback_models: list[dict[str, Any]] | None = None,
+    pas_folder_id: str | None = None,
     remiel_config: RemielContextConfig | None = None,
     prep_services: InterventionPrepServices | None = None,
     **kwargs,
@@ -428,6 +710,14 @@ async def run_channel_pipeline(
     # 멘션 스레드 메시지도 정상적으로 judged로 이동(소화)되어야 합니다.
     snapshot_ts = {m.get("ts", "") for m in pending_messages if m.get("ts")}
     snapshot_thread_ts = set(thread_buffers.keys()) if thread_buffers else None
+    snapshot_thread_msg_ts = {
+        thread_ts: {
+            str(message.get("ts"))
+            for message in messages
+            if message.get("ts")
+        }
+        for thread_ts, messages in (thread_buffers or {}).items()
+    }
 
     # 멘션 스레드 식별: 리액션/개입 필터링에 사용 (소화는 정상 처리)
     mention_handled_ts: set[str] = set()
@@ -475,7 +765,9 @@ async def run_channel_pipeline(
             f"판단할 메시지 없음, judge 스킵 ({channel_id}): "
             f"pending {len(pending_messages)}건은 모두 필터링됨"
         )
-        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
+        store.move_snapshot_to_judged(
+            channel_id, snapshot_ts, snapshot_thread_ts, snapshot_thread_msg_ts
+        )
         return
 
     judge_result = await observer.judge(
@@ -492,7 +784,9 @@ async def run_channel_pipeline(
     # 이동하지 않으면 스레드 버퍼가 pending에 영원히 남아 무한 루프를 유발한다.
     if judge_result is None:
         logger.warning(f"judge가 None 반환 ({channel_id})")
-        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
+        store.move_snapshot_to_judged(
+            channel_id, snapshot_ts, snapshot_thread_ts, snapshot_thread_msg_ts
+        )
         return
 
     # d-0a) Bug D: pending ts에 없는 JudgeItem 필터링
@@ -541,6 +835,11 @@ async def run_channel_pipeline(
                 intervene_model=intervene_model,
                 folder_id=folder_id,
                 agent_id=agent_id,
+                pas_default_model=pas_default_model or DEFAULT_CHANNEL_PAS_MODEL,
+                pas_fallback_models=pas_fallback_models or DEFAULT_CHANNEL_PAS_FALLBACK_MODELS,
+                pas_folder_id=pas_folder_id if pas_folder_id is not None else folder_id,
+                buffer_threshold=buffer_threshold,
+                compressor=compressor,
                 remiel_config=remiel_config,
                 prep_services=prep_services,
             )
@@ -567,12 +866,19 @@ async def run_channel_pipeline(
                 intervene_model=intervene_model,
                 folder_id=folder_id,
                 agent_id=agent_id,
+                pas_default_model=pas_default_model or DEFAULT_CHANNEL_PAS_MODEL,
+                pas_fallback_models=pas_fallback_models or DEFAULT_CHANNEL_PAS_FALLBACK_MODELS,
+                pas_folder_id=pas_folder_id if pas_folder_id is not None else folder_id,
+                buffer_threshold=buffer_threshold,
+                compressor=compressor,
                 remiel_config=remiel_config,
                 prep_services=prep_services,
             )
     finally:
         # 스냅샷에 포함된 메시지만 judged로 이동 (파이프라인 중 새로 도착한 메시지는 pending에 잔류)
-        store.move_snapshot_to_judged(channel_id, snapshot_ts, snapshot_thread_ts)
+        store.move_snapshot_to_judged(
+            channel_id, snapshot_ts, snapshot_thread_ts, snapshot_thread_msg_ts
+        )
 
 
 async def _handle_multi_judge(
@@ -690,6 +996,11 @@ async def _handle_multi_judge(
                             intervene_model=intervene_model,
                             folder_id=folder_id,
                             agent_id=agent_id,
+                            pas_default_model=kwargs.get("pas_default_model"),
+                            pas_fallback_models=kwargs.get("pas_fallback_models"),
+                            pas_folder_id=kwargs.get("pas_folder_id", folder_id),
+                            buffer_threshold=kwargs.get("buffer_threshold", 150),
+                            compressor=kwargs.get("compressor"),
                             remiel_config=remiel_config,
                             prep_services=prep_services,
                         )
@@ -835,6 +1146,11 @@ async def _handle_single_judge(
                             intervene_model=intervene_model,
                             folder_id=folder_id,
                             agent_id=agent_id,
+                            pas_default_model=kwargs.get("pas_default_model"),
+                            pas_fallback_models=kwargs.get("pas_fallback_models"),
+                            pas_folder_id=kwargs.get("pas_folder_id", folder_id),
+                            buffer_threshold=kwargs.get("buffer_threshold", 150),
+                            compressor=kwargs.get("compressor"),
                             remiel_config=remiel_config,
                             prep_services=prep_services,
                         )
@@ -988,6 +1304,16 @@ async def run_message_jev_pipeline(
     if not text or not ts:
         return None
     thread_ts = event.get("thread_ts")
+    thread_root_ts = str(thread_ts or "").strip()
+    is_thread_reply = bool(thread_root_ts and thread_root_ts != ts)
+    target_message = {
+        "ts": ts,
+        "user": event["user"],
+        "text": text,
+        "thread_ts": thread_ts,
+    }
+    if not is_thread_reply and store is not None:
+        store.upsert_pending(channel_id, target_message)
 
     mention_backend = mention.get_backend()
     if bot_user_id and f"<@{bot_user_id}>" in text and mention_backend is not None:
@@ -1012,8 +1338,6 @@ async def run_message_jev_pipeline(
             channel_id, history, bot_user_id=bot_user_id
         )
 
-    thread_root_ts = str(thread_ts or "").strip()
-    is_thread_reply = bool(thread_root_ts and thread_root_ts != ts)
     thread_history: list[Any] = []
     if is_thread_reply:
         try:
@@ -1093,12 +1417,6 @@ async def run_message_jev_pipeline(
         if item["ts"] != thread_root_ts:
             thread_replies_by_ts[item["ts"]] = item
 
-    target_message = {
-        "ts": ts,
-        "user": event["user"],
-        "text": text,
-        "thread_ts": thread_ts,
-    }
     if is_thread_reply:
         if store is not None:
             for message in store.load_thread_buffer(channel_id, thread_root_ts):
@@ -1196,6 +1514,17 @@ async def run_message_jev_pipeline(
             )
             context_messages = [*recent_messages, target_message]
             forwarded_kwargs = dict(kwargs)
+            forwarded_kwargs.update({
+                "target_message": target_message,
+                "target_ts": ts,
+                "current_thread_ts": thread_root_ts if is_thread_reply else None,
+                "channel_name": event.get("channel_name"),
+                "pas_default_model": kwargs.get("pas_default_model"),
+                "pas_fallback_models": kwargs.get("pas_fallback_models"),
+                "pas_folder_id": kwargs.get("pas_folder_id", folder_id),
+                "buffer_threshold": kwargs.get("buffer_threshold", 150),
+                "compressor": kwargs.get("compressor"),
+            })
             if is_thread_reply:
                 existing_reply_ts = {
                     str(reply.get("ts") or "") for reply in thread_reply_dicts
@@ -1248,7 +1577,99 @@ async def _execute_intervene(
     prep_services: InterventionPrepServices | None = None,
     **kwargs,
 ) -> None:
+    """채널별 실행 락 안에서 개입을 수행합니다."""
+    if inspect.getattr_static(store, "pas_run_lock", None) is not None:
+        run_lock = store.pas_run_lock(channel_id)
+        await asyncio.to_thread(run_lock.acquire)
+        try:
+            await _execute_intervene_locked(
+                store=store,
+                channel_id=channel_id,
+                action=action,
+                pending_messages=pending_messages,
+                observer_reason=observer_reason,
+                llm_call=llm_call,
+                bot_user_id=bot_user_id,
+                thread_buffers=thread_buffers,
+                recent_messages_count=recent_messages_count,
+                intervene_model=intervene_model,
+                folder_id=folder_id,
+                agent_id=agent_id,
+                remiel_config=remiel_config,
+                prep_services=prep_services,
+                **kwargs,
+            )
+        finally:
+            run_lock.release()
+    else:
+        await _execute_intervene_locked(
+            store=store,
+            channel_id=channel_id,
+            action=action,
+            pending_messages=pending_messages,
+            observer_reason=observer_reason,
+            llm_call=llm_call,
+            bot_user_id=bot_user_id,
+            thread_buffers=thread_buffers,
+            recent_messages_count=recent_messages_count,
+            intervene_model=intervene_model,
+            folder_id=folder_id,
+            agent_id=agent_id,
+            remiel_config=remiel_config,
+            prep_services=prep_services,
+            **kwargs,
+        )
+
+
+async def _execute_intervene_locked(
+    store: ChannelStore,
+    channel_id: str,
+    action: InterventionAction,
+    pending_messages: list[dict],
+    observer_reason: str | None = None,
+    llm_call: Optional[Callable] = None,
+    bot_user_id: str | None = None,
+    thread_buffers: dict[str, list[dict]] | None = None,
+    recent_messages_count: int = 5,
+    intervene_model: str | None = None,
+    folder_id: str | None = None,
+    agent_id: str | None = None,
+    remiel_config: RemielContextConfig | None = None,
+    prep_services: InterventionPrepServices | None = None,
+    **kwargs,
+) -> None:
     """서소영의 개입 응답을 생성하고 발송합니다."""
+    default_state = ChannelStore._default_pas_state(channel_id)
+    if inspect.getattr_static(store, "load_pas_state", None) is not None:
+        pas_state = store.load_pas_state(channel_id)
+    else:
+        pas_state = default_state
+
+    ensure_channel_pas = (
+        getattr(soulstream, "ensure_channel_pas", None)
+        if inspect.getattr_static(soulstream, "ensure_channel_pas", None) is not None
+        else None
+    )
+    pas_session_id = pas_state.get("session_id")
+    pas_default_model = kwargs.get("pas_default_model") or DEFAULT_CHANNEL_PAS_MODEL
+    pas_fallback_models = kwargs.get("pas_fallback_models") or DEFAULT_CHANNEL_PAS_FALLBACK_MODELS
+    pas_folder_id = kwargs.get("pas_folder_id", folder_id)
+    if ensure_channel_pas is not None:
+        pas_session_id = await ensure_channel_pas(
+            agent_id="seosoyoung-intervene",
+            folder_id=pas_folder_id,
+            default_model=pas_default_model,
+            fallback_models=pas_fallback_models,
+            session_id=pas_state.get("session_id"),
+            display_name=f"💬 채널개입 PAS: #{kwargs.get('channel_name') or channel_id}",
+        )
+        if isinstance(pas_session_id, dict):
+            pas_session_id = pas_session_id.get("session_id")
+        if pas_session_id != pas_state.get("session_id"):
+            pas_state["session_id"] = pas_session_id
+            if inspect.getattr_static(store, "save_pas_state", None) is not None:
+                pas_state = store.save_pas_state(channel_id, pas_state)
+
     # 0. 트리거 메시지에 :ssy-thinking: 이모지 추가 (응답 생성 중 피드백)
     reaction_ts = action.target if action.target and action.target != "channel" else None
     if reaction_ts:
@@ -1259,127 +1680,49 @@ async def _execute_intervene(
         except Exception as e:
             logger.debug(f"thinking 이모지 추가 실패: {e}")
 
-    # 1. 갱신된 digest 로드
-    digest_data = store.get_digest(channel_id)
-    digest = digest_data["content"] if digest_data else None
+    target_message = kwargs.get("target_message")
+    target_ts = kwargs.get("target_ts") or (
+        str(target_message.get("ts")) if target_message else
+        (action.target if action.target and action.target != "channel" else None)
+    )
+    delta = await _build_channel_pas_delta(
+        store=store,
+        channel_id=channel_id,
+        pas_state=pas_state,
+        target_ts=target_ts,
+        target_message=target_message,
+        current_thread_ts=kwargs.get("current_thread_ts"),
+        pending_messages=pending_messages,
+        thread_buffers=thread_buffers,
+        bot_user_id=bot_user_id,
+        recent_messages_count=recent_messages_count,
+        judgment_reason=observer_reason,
+        buffer_threshold=int(kwargs.get("buffer_threshold", 150)),
+        compressor=kwargs.get("compressor"),
+    )
+    if delta.get("empty"):
+        logger.info("PAS 개입 스킵 — 미전달 Delta 없음 (%s, %s)", channel_id, target_ts)
+        await _remove_thinking_reaction(channel_id, reaction_ts)
+        return
 
-    # 2. 트리거 메시지와 최근 메시지 분리
-    target_ts = action.target
-    trigger_message = None
-    recent_messages = []
-
-    # judged + pending을 합쳐서 최근 컨텍스트 풀 확보
-    # 파이프라인이 pending → judged를 원자적으로 이동(snapshot)하므로 중복 없음
-    judged_messages = store.load_judged(channel_id)
-    all_context = judged_messages + pending_messages
-
-    if target_ts and target_ts != "channel":
-        # all_context에서 트리거 검색 + 직전 N개 슬라이싱
-        for i, msg in enumerate(all_context):
-            if msg.get("ts") == target_ts:
-                trigger_message = msg
-                start = max(0, i - recent_messages_count)
-                recent_messages = all_context[start:i]
-                break
-
-        # all_context에 없으면 thread_buffers에서 검색
-        if trigger_message is None and thread_buffers:
-            for thread_msgs in thread_buffers.values():
-                for msg in thread_msgs:
-                    if msg.get("ts") == target_ts:
-                        trigger_message = msg
-                        recent_messages = all_context[-recent_messages_count:]
-                        break
-                if trigger_message is not None:
-                    break
-
-        if trigger_message is None:
-            if all_context:
-                trigger_message = all_context[-1]
-                recent_messages = all_context[-(recent_messages_count + 1):-1]
-            elif thread_buffers:
-                thread_messages = thread_buffers.get(target_ts) or [
-                    message
-                    for messages in thread_buffers.values()
-                    for message in messages
-                ]
-                if thread_messages:
-                    trigger_message = thread_messages[-1]
-                    recent_messages = thread_messages[-(recent_messages_count + 1):-1]
-
-        if trigger_message is None:
-            logger.warning(
-                f"intervene 스킵: target_ts={target_ts}를 "
-                f"all_context/thread_buffers 어디에서도 찾을 수 없음 ({channel_id})"
-            )
-            await _remove_thinking_reaction(channel_id, reaction_ts)
-            return
-
-    if trigger_message is None and all_context:
-        # target이 "channel"인 경우에만 여기에 도달
-        trigger_message = all_context[-1]
-        recent_messages = all_context[-(recent_messages_count + 1):-1]
-
-    # 3. 컨텍스트 구성
-    # system_prompt는 더 이상 주입하지 않는다 — 폴더 프롬프트(7fff70ac-...) +
-    # channel-intervene SKILL.md가 정본. 코드 측 주입은 Agent SDK 기본 preset
-    # (available-skills, CLAUDE.md, 폴더 프롬프트)을 덮어버리는 결함이었음.
-
-    # 스레드 대상이면 해당 ts, 채널 대상이면 트리거 메시지 ts를 세션 키로 사용
+    thread_context = delta["text"]
+    message_timestamps = [
+        str(message.get("ts")) for message in delta["messages"] if message.get("ts")
+    ]
+    remiel_timestamps = [
+        str(message.get("ts")) for message in delta["roots"] if message.get("ts")
+    ]
+    trigger_message = next(
+        (message for message in delta["messages"] if str(message.get("ts")) == delta["target_ts"]),
+        target_message,
+    )
+    recent_messages = delta["messages"][-recent_messages_count:]
     run_thread_ts = (
         action.target
         if action.target and action.target != "channel"
-        else (trigger_message["ts"] if trigger_message else pending_messages[-1]["ts"])
+        else (delta["target_ts"] or (trigger_message or {}).get("ts"))
     )
-
     prompt = "(채널 개입 트리거)"
-
-    resolver = _make_resolver()
-    thread_context, remiel_timestamps = await _fetch_recent_context_bundle(
-        channel_id,
-        bot_user_id=bot_user_id,
-        resolver=resolver,
-    )
-
-    relevant_thread_timestamps: list[str] = []
-    if thread_buffers:
-        trigger_ts = (
-            action.target
-            if action.target and action.target != "channel"
-            else (trigger_message.get("ts") if trigger_message else None)
-        )
-        if trigger_ts and trigger_ts in thread_buffers:
-            relevant_thread_timestamps.append(trigger_ts)
-
-        for message in pending_messages:
-            thread_ts = message.get("thread_ts")
-            if (
-                thread_ts
-                and thread_ts in thread_buffers
-                and thread_ts not in relevant_thread_timestamps
-            ):
-                relevant_thread_timestamps.append(thread_ts)
-
-    thread_replies = _format_thread_buffers(
-        thread_buffers,
-        thread_timestamps=relevant_thread_timestamps,
-        channel_id=channel_id,
-        resolver=resolver,
-        reply_limit=20,
-    )
-    reply_timestamps = [
-        str(message.get("ts"))
-        for thread_ts in relevant_thread_timestamps
-        for message in (thread_buffers or {}).get(thread_ts, [])[-20:]
-        if message.get("ts")
-    ]
-    if thread_replies:
-        replies_section = f"## 스레드 답글\n{thread_replies}"
-        thread_context = (
-            f"{thread_context}\n\n{replies_section}"
-            if thread_context
-            else replies_section
-        )
 
     context_items = [
         {
@@ -1405,9 +1748,7 @@ async def _execute_intervene(
             thread_context=thread_context,
             output_dir=services.output_dir,
             slug=slug,
-            message_timestamps=list(
-                dict.fromkeys([*remiel_timestamps, *reply_timestamps])
-            ),
+            message_timestamps=list(dict.fromkeys(message_timestamps)),
         )
     )
 
@@ -1422,13 +1763,8 @@ async def _execute_intervene(
         ):
             participant_ids.append(user_id)
 
-    for message in recent_messages:
+    for message in delta["messages"]:
         _add_participant(message.get("user"))
-    if trigger_message:
-        _add_participant(trigger_message.get("user"))
-    for thread_ts in relevant_thread_timestamps:
-        for message in (thread_buffers or {}).get(thread_ts, [])[-20:]:
-            _add_participant(message.get("user"))
 
     preload_started = time.monotonic()
     (
@@ -1471,33 +1807,40 @@ async def _execute_intervene(
 
     # 4. 응답 생성 (Soulstream 경유 Claude Code)
     run_result = None
+    run_kwargs = {
+        "prompt": prompt,
+        "channel": channel_id,
+        "thread_ts": run_thread_ts,
+        "text_only": True,
+        "context": context_items,
+        "model": intervene_model,
+        "folder_id": pas_folder_id,
+        "agent_id": agent_id,
+        "caller_info": build_bot_caller_info(
+            source="channel_observer",
+            display_name="채널 관찰자",
+            agent_node=get_host_preferred_node(),
+        ),
+    }
+    if pas_session_id:
+        run_kwargs.update({
+            "session_id": pas_session_id,
+            "use_persistent_session": True,
+            "delivery_id": delta["batch_id"],
+            "agent_id": "seosoyoung-intervene",
+        })
     try:
-        run_result = await run_and_name_session(
-            soulstream.run(
-                prompt=prompt,
-                channel=channel_id,
+        if pas_session_id:
+            run_result = await _call_with_supported_kwargs(soulstream.run, **run_kwargs)
+            await prep_task
+        else:
+            run_result = await run_and_name_session(
+                _call_with_supported_kwargs(soulstream.run, **run_kwargs),
                 thread_ts=run_thread_ts,
-                text_only=True,
-                context=context_items,
-                model=intervene_model,
-                folder_id=folder_id,
-                agent_id=agent_id,
-                # R-4 fix(2026-05-11, atom G-12 + G-14): plugin_sdk helper로 정본 통합.
-                # build_bot_caller_info — display_name + server-relative avatar_url 박음 (R-3 G-5 정합).
-                # get_host_preferred_node — host config Config.orchestrator.preferred_node 동적 조회 → caller_info.agent_node.
-                # truthy면 채움(다중 노드 audit 가시성), None이면 키 부재(자동 라우팅 graceful).
-                # 정본: seosoyoung/plugin_sdk/caller_info.py (cross-import 회귀로 soul_common 정본과 시그니처 정합).
-                caller_info=build_bot_caller_info(
-                    source="channel_observer",
-                    display_name="채널 관찰자",
-                    agent_node=get_host_preferred_node(),
-                ),
-            ),
-            thread_ts=run_thread_ts,
-            prep_task=prep_task,
-            get_session_id=soulstream.get_session_id,
-            set_session_name=services.set_session_name,
-        )
+                prep_task=prep_task,
+                get_session_id=soulstream.get_session_id,
+                set_session_name=services.set_session_name,
+            )
     except Exception as e:
         logger.error(f"intervene 응답 생성 실패 ({channel_id}): {e}")
         await _remove_thinking_reaction(channel_id, reaction_ts)
@@ -1508,6 +1851,30 @@ async def _execute_intervene(
             logger.error(f"intervene soulstream 실패 ({channel_id}): {run_result.error}")
             await _remove_thinking_reaction(channel_id, reaction_ts)
         else:
+            old_read_ts = str(pas_state.get("read_ts") or "")
+            root_ts = delta["snapshot_ts"]
+            if root_ts:
+                newest_root_ts = max(root_ts, key=_ts_sort_key)
+                if not old_read_ts or _ts_sort_key(newest_root_ts) > _ts_sort_key(old_read_ts):
+                    pas_state["read_ts"] = newest_root_ts
+            thread_cursors = dict(pas_state.get("read_thread_ts_map") or {})
+            for thread_ts, message_ts in delta["snapshot_thread_msg_ts"].items():
+                if message_ts:
+                    newest_reply_ts = max(message_ts, key=_ts_sort_key)
+                    previous = str(thread_cursors.get(thread_ts) or "")
+                    if not previous or _ts_sort_key(newest_reply_ts) > _ts_sort_key(previous):
+                        thread_cursors[thread_ts] = newest_reply_ts
+            pas_state["read_thread_ts_map"] = thread_cursors
+            pas_state["initialized_context"] = True
+            if inspect.getattr_static(store, "save_pas_state", None) is not None:
+                pas_state = store.save_pas_state(channel_id, pas_state)
+            store.move_snapshot_to_judged(
+                channel_id,
+                delta["snapshot_ts"],
+                delta["snapshot_thread_ts"],
+                delta["snapshot_thread_msg_ts"],
+            )
+
             # 게시 정책 (사용자 결정 2026-05-18, 사이클 260518.01):
             #   - backend가 thinking / text_start~text_end / complete 각 *블록의 텍스트만*에서
             #     ``<utterance>(.*?)</utterance>`` 매치를 추출하여 ``RunResult.utterances`` list로
@@ -1529,7 +1896,7 @@ async def _execute_intervene(
                     f"raw_matches={len(raw_matches)}"
                 )
                 await _remove_thinking_reaction(channel_id, reaction_ts)
-            else:
+            elif pas_state.get("last_posted_batch_id") != delta["batch_id"]:
                 response_text = "\n".join(unique)
 
     # 5. 슬랙 발송 + 봇 응답 ts를 judged에 기록
@@ -1551,6 +1918,11 @@ async def _execute_intervene(
             resp_ts = send_result.ts if send_result.ok else None
 
             if resp_ts:
+                pas_state["last_posted_ts"] = resp_ts
+                pas_state["last_posted_trigger_ts"] = delta["target_ts"]
+                pas_state["last_posted_batch_id"] = delta["batch_id"]
+                if inspect.getattr_static(store, "save_pas_state", None) is not None:
+                    pas_state = store.save_pas_state(channel_id, pas_state)
                 bot_msg = {
                     "ts": resp_ts,
                     "user": bot_user_id or "bot",
