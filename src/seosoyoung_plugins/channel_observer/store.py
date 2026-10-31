@@ -53,7 +53,10 @@ class ChannelStore:
     def pas_run_lock(self, channel_id: str) -> FileLock:
         """같은 채널의 개입 실행을 직렬화하는 파일 락을 반환합니다."""
         self._ensure_channel_dir(channel_id)
-        return FileLock(str(self._channel_dir(channel_id) / "pas_run.lock"))
+        return FileLock(
+            str(self._channel_dir(channel_id) / "pas_run.lock"),
+            thread_local=False,
+        )
 
     @staticmethod
     def _default_pas_state(channel_id: str) -> dict:

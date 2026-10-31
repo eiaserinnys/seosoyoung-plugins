@@ -72,10 +72,11 @@ async def test_execute_appends_trigger_thread_replies_without_remiel_reply_times
 
     context = mock_plugin_sdk["soulstream"].run.call_args.kwargs["context"]
     thread_context = context[0]["content"]
-    assert "## 스레드 답글" in thread_context
-    assert f"[C08KT1HDU5U:{root_ts}] 스레드" in thread_context
+    assert thread_context.index(f"[C08KT1HDU5U:{root_ts}]") < thread_context.index(
+        f"[C08KT1HDU5U:{reply_ts}]"
+    )
     assert (
-        f"  [C08KT1HDU5U:{reply_ts}] "
+        f"[C08KT1HDU5U:{reply_ts}] (스레드 C08KT1HDU5U:{root_ts}, 원문: 질문) "
         "<Cha, Seungkyu [scha] / [U08UYUVCBD0]>: 테트리스가 안되지 않나요?"
     ) in thread_context
     assert prep_builder.await_args.kwargs["message_timestamps"] == [root_ts, reply_ts]
@@ -126,8 +127,10 @@ async def test_execute_appends_pending_messages_thread_replies(
     )
 
     context = mock_plugin_sdk["soulstream"].run.call_args.kwargs["context"]
-    assert "## 스레드 답글" in context[0]["content"]
-    assert f"[C_TEST:{reply_ts}] <U2>: reply" in context[0]["content"]
+    assert (
+        f"[C_TEST:{reply_ts}] (스레드 C_TEST:{root_ts}, 원문: 원문 없음) <U2>: reply"
+        in context[0]["content"]
+    )
 
 
 @pytest.mark.asyncio

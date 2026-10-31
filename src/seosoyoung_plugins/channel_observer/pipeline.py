@@ -256,6 +256,8 @@ async def _build_channel_pas_delta(
         selected = []
         for raw in messages:
             message = _pas_message_dict(raw)
+            if not message.get("thread_ts"):
+                message["thread_ts"] = thread_ts
             ts = str(message.get("ts") or "")
             if not ts or (cursor and _ts_sort_key(ts) <= _ts_sort_key(cursor)):
                 continue
@@ -270,6 +272,12 @@ async def _build_channel_pas_delta(
     if not root_delta and not reply_delta:
         return {"empty": True}
 
+    roots_by_ts_full = dict(roots_by_ts)
+    if target_message:
+        target_message_ts = str(target_message.get("ts") or "")
+        if target_message_ts:
+            roots_by_ts_full[target_message_ts] = target_message
+
     resolver = _make_resolver()
 
     def format_message(message: dict[str, Any]) -> str:
@@ -280,23 +288,26 @@ async def _build_channel_pas_delta(
             if display_name and (user_id in display_name or display_name == user_id)
             else f"{display_name} ({user_id})" if display_name else user_id
         )
-        return f"[{channel_id}:{message.get('ts')}] <{speaker}>: {message.get('text') or ''}"
-
-    lines = [format_message(message) for message in root_delta]
-    roots_by_ts_full = dict(roots_by_ts)
-    if target_message:
-        roots_by_ts_full[str(target_message.get("ts") or "")] = target_message
-    if reply_delta:
-        lines.append("## 스레드 답글")
-        for thread_ts in sorted(reply_delta, key=_ts_sort_key):
+        ts = str(message.get("ts") or "")
+        thread_ts = str(message.get("thread_ts") or "")
+        thread_context = ""
+        if thread_ts and thread_ts != ts:
             root = roots_by_ts_full.get(thread_ts, {})
-            lines.append(
-                f"### [{channel_id}:{thread_ts}] 스레드 "
-                f"(원문: {root.get('text') or '원문 없음'})"
+            thread_context = (
+                f" (스레드 {channel_id}:{thread_ts}, "
+                f"원문: {root.get('text') or '원문 없음'})"
             )
-            lines.extend(
-                f"  {format_message(reply)}" for reply in reply_delta[thread_ts]
-            )
+        return (
+            f"[{channel_id}:{ts}]{thread_context} "
+            f"<{speaker}>: {message.get('text') or ''}"
+        )
+
+    messages_for_snapshot = [
+        *root_delta,
+        *(item for group in reply_delta.values() for item in group),
+    ]
+    messages_for_snapshot.sort(key=_ts_sort_key)
+    lines = [format_message(message) for message in messages_for_snapshot]
 
     target_label = target_ts or (
         str(target_message.get("ts")) if target_message else
@@ -305,14 +316,13 @@ async def _build_channel_pas_delta(
     lines.append(f"이번 개입 트리거: [{channel_id}:{target_label}]")
     lines.append(f"Jev 판단 사유: {judgment_reason or '(없음)'}")
     delta_text = "\n".join(lines)
-    messages_for_snapshot = [*root_delta, *(item for group in reply_delta.values() for item in group)]
-    messages_for_snapshot.sort(key=_ts_sort_key)
     if TokenCounter().count_string(delta_text) > buffer_threshold and len(messages_for_snapshot) > recent_messages_count:
-        keep = set(id(item) for item in messages_for_snapshot[-recent_messages_count:])
+        older_messages = messages_for_snapshot[:-recent_messages_count]
+        recent_messages = messages_for_snapshot[-recent_messages_count:]
         older_text = "\n".join(
-            format_message(item) for item in messages_for_snapshot if id(item) not in keep
+            format_message(item) for item in older_messages
         )
-        compressed = None
+        summary = None
         if compressor is not None:
             try:
                 compressed = await compressor.compress(
@@ -321,12 +331,16 @@ async def _build_channel_pas_delta(
                 )
             except Exception as error:
                 logger.warning("PAS Delta 압축 실패 (%s): %s", channel_id, error)
-        if compressed:
-            summary = compressed.digest if hasattr(compressed, "digest") else str(compressed)
-        else:
-            summary = f"이전 대화 {len(messages_for_snapshot) - recent_messages_count}건은 생략했습니다."
-        recent_text = "\n".join(format_message(item) for item in messages_for_snapshot[-recent_messages_count:])
-        delta_text = f"## 이전 대화 요약\n{summary}\n## 최근 대화\n{recent_text}\n" + "\n".join(lines[-2:])
+            else:
+                candidate = getattr(compressed, "digest", compressed)
+                if isinstance(candidate, str) and candidate.strip():
+                    summary = candidate.strip()
+        if summary:
+            recent_text = "\n".join(format_message(item) for item in recent_messages)
+            delta_text = (
+                f"## 이전 대화 요약\n{summary}\n## 최근 대화\n{recent_text}\n"
+                + "\n".join(lines[-2:])
+            )
 
     snapshot_ts = {str(message.get("ts")) for message in root_delta if message.get("ts")}
     snapshot_thread_msg_ts = {
@@ -1600,7 +1614,7 @@ async def _execute_intervene(
                 **kwargs,
             )
         finally:
-            run_lock.release()
+            await asyncio.to_thread(run_lock.release)
     else:
         await _execute_intervene_locked(
             store=store,

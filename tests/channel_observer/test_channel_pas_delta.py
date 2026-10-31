@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -45,6 +46,111 @@ async def test_delta_uses_root_and_thread_read_cursors(tmp_path, mock_plugin_sdk
     assert "이번 개입 트리거: [C001:2.1]" in delta["text"]
     assert "Jev 판단 사유: asked for help" in delta["text"]
     assert delta["batch_id"].startswith("chan-pas-C001-")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("compressor_mode", ["none", "failure"])
+async def test_delta_keeps_full_timeline_when_compressor_is_unavailable(
+    tmp_path, mock_plugin_sdk, monkeypatch, compressor_mode
+):
+    from seosoyoung_plugins.channel_observer import pipeline
+
+    store = ChannelStore(tmp_path)
+    messages = [
+        {"ts": f"{index}.0", "user": f"U{index}", "text": f"message-{index}"}
+        for index in range(1, 5)
+    ]
+    for message in messages:
+        store.upsert_pending("C001", message)
+    monkeypatch.setattr(pipeline.slack, "get_channel_history", AsyncMock(return_value=[]))
+    monkeypatch.setattr(pipeline, "_make_resolver", lambda: None)
+    compressor = None
+    if compressor_mode == "failure":
+        compressor = SimpleNamespace(
+            compress=AsyncMock(side_effect=RuntimeError("compression unavailable"))
+        )
+
+    delta = await _build_channel_pas_delta(
+        store=store,
+        channel_id="C001",
+        pas_state={"read_ts": "", "read_thread_ts_map": {}},
+        target_ts="4.0",
+        target_message=messages[-1],
+        current_thread_ts=None,
+        pending_messages=messages,
+        thread_buffers=None,
+        bot_user_id="UBOT",
+        recent_messages_count=2,
+        judgment_reason=None,
+        buffer_threshold=1,
+        compressor=compressor,
+    )
+
+    for message in messages:
+        assert message["text"] in delta["text"]
+    assert "## 이전 대화 요약" not in delta["text"]
+    assert "건은 생략했습니다" not in delta["text"]
+
+
+@pytest.mark.asyncio
+async def test_delta_timeline_interleaves_roots_and_thread_replies_by_timestamp(
+    tmp_path, mock_plugin_sdk, monkeypatch
+):
+    from seosoyoung_plugins.channel_observer import pipeline
+
+    store = ChannelStore(tmp_path)
+    store.upsert_pending("C001", {"ts": "10.0", "user": "U1", "text": "root before"})
+    store.upsert_thread_message(
+        "C001", "10.0", {"ts": "11.0", "user": "U2", "text": "reply"}
+    )
+    store.upsert_pending("C001", {"ts": "12.0", "user": "U3", "text": "root after"})
+    monkeypatch.setattr(pipeline.slack, "get_channel_history", AsyncMock(return_value=[]))
+    monkeypatch.setattr(pipeline, "_make_resolver", lambda: None)
+
+    delta = await _build_channel_pas_delta(
+        store=store,
+        channel_id="C001",
+        pas_state={"read_ts": "", "read_thread_ts_map": {}},
+        target_ts="12.0",
+        target_message=None,
+        current_thread_ts=None,
+        pending_messages=[],
+        thread_buffers=None,
+        bot_user_id="UBOT",
+        recent_messages_count=5,
+        judgment_reason=None,
+        buffer_threshold=1000,
+    )
+
+    before = delta["text"].index("[C001:10.0]")
+    reply = delta["text"].index("[C001:11.0]")
+    after = delta["text"].index("[C001:12.0]")
+    assert before < reply < after
+    assert "(스레드 C001:10.0, 원문: root before)" in delta["text"]
+
+
+@pytest.mark.asyncio
+async def test_pas_run_lock_releases_between_interventions(tmp_path, monkeypatch):
+    from seosoyoung_plugins.channel_observer import pipeline
+
+    store = ChannelStore(tmp_path)
+    calls = []
+
+    async def record_locked_call(**kwargs):
+        calls.append(kwargs["channel_id"])
+
+    monkeypatch.setattr(pipeline, "_execute_intervene_locked", record_locked_call)
+    invocation = {
+        "store": store,
+        "channel_id": "C001",
+        "action": InterventionAction(type="message", target="channel", content="test"),
+        "pending_messages": [],
+    }
+
+    await asyncio.wait_for(_execute_intervene(**invocation), timeout=2)
+    await asyncio.wait_for(_execute_intervene(**invocation), timeout=2)
+
+    assert calls == ["C001", "C001"]
 
 
 @pytest.mark.asyncio
