@@ -14,7 +14,10 @@
 
 import json
 import logging
+import os
 from pathlib import Path
+import tempfile
+from datetime import datetime, timezone
 
 from filelock import FileLock
 
@@ -40,6 +43,87 @@ class ChannelStore:
 
     def _threads_dir(self, channel_id: str) -> Path:
         return self._channel_dir(channel_id) / "buffer_threads"
+
+    def _pas_state_path(self, channel_id: str) -> Path:
+        return self._channel_dir(channel_id) / "pas_state.json"
+
+    def _pas_state_lock_path(self, channel_id: str) -> Path:
+        return self._channel_dir(channel_id) / "pas_state.lock"
+
+    def pas_run_lock(self, channel_id: str) -> FileLock:
+        """같은 채널의 개입 실행을 직렬화하는 파일 락을 반환합니다."""
+        self._ensure_channel_dir(channel_id)
+        return FileLock(
+            str(self._channel_dir(channel_id) / "pas_run.lock"),
+            thread_local=False,
+        )
+
+    @staticmethod
+    def _default_pas_state(channel_id: str) -> dict:
+        return {
+            "channel_id": channel_id,
+            "session_id": None,
+            "initialized_context": False,
+            "read_ts": "",
+            "read_thread_ts_map": {},
+            "last_posted_ts": None,
+            "last_posted_trigger_ts": None,
+            "last_posted_batch_id": None,
+            "updated_at": None,
+        }
+
+    def load_pas_state(self, channel_id: str) -> dict:
+        """채널 PAS 상태를 읽고 손상·누락된 경우 기본값으로 보충합니다."""
+        self._ensure_channel_dir(channel_id)
+        defaults = self._default_pas_state(channel_id)
+        lock = FileLock(str(self._pas_state_lock_path(channel_id)), timeout=5)
+        with lock:
+            try:
+                with open(self._pas_state_path(channel_id), encoding="utf-8") as handle:
+                    raw = json.load(handle)
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        state = {**defaults, **raw, "channel_id": channel_id}
+        if not isinstance(state.get("read_thread_ts_map"), dict):
+            state["read_thread_ts_map"] = {}
+        return state
+
+    def save_pas_state(self, channel_id: str, state: dict) -> dict:
+        """PAS 상태를 잠금 아래 임시 파일에 기록하고 원자적으로 교체합니다."""
+        self._ensure_channel_dir(channel_id)
+        updated = {
+            **self._default_pas_state(channel_id),
+            **state,
+            "channel_id": channel_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if not isinstance(updated.get("read_thread_ts_map"), dict):
+            updated["read_thread_ts_map"] = {}
+        path = self._pas_state_path(channel_id)
+        lock = FileLock(str(self._pas_state_lock_path(channel_id)), timeout=5)
+        with lock:
+            temp_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=path.parent,
+                    prefix=f".{path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temp_path = Path(handle.name)
+                    json.dump(updated, handle, ensure_ascii=False, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, path)
+            finally:
+                if temp_path is not None and temp_path.exists():
+                    temp_path.unlink()
+        return updated
 
     def _ensure_threads_dir(self, channel_id: str) -> Path:
         d = self._threads_dir(channel_id)
@@ -168,6 +252,7 @@ class ChannelStore:
         channel_id: str,
         snapshot_ts: set[str],
         snapshot_thread_ts: set[str] | None = None,
+        snapshot_thread_msg_ts: dict[str, set[str]] | None = None,
     ) -> None:
         """스냅샷에 포함된 메시지만 judged로 이동하고 나머지는 pending에 남깁니다.
 
@@ -181,7 +266,10 @@ class ChannelStore:
         self._ensure_channel_dir(channel_id)
         lock = FileLock(str(self._pending_lock(channel_id)), timeout=5)
         with lock:
-            current_pending = self._read_jsonl(self._pending_path(channel_id))
+            pending_path = self._pending_path(channel_id)
+            current_pending = (
+                self._read_jsonl(pending_path) if pending_path.exists() else []
+            )
             to_judged = [m for m in current_pending if m.get("ts", "") in snapshot_ts]
             remaining = [m for m in current_pending if m.get("ts", "") not in snapshot_ts]
 
@@ -198,20 +286,42 @@ class ChannelStore:
                 path.unlink()
 
         # 스레드 버퍼: 스냅샷에 포함된 thread_ts만 judged로 이동
-        if snapshot_thread_ts:
+        if snapshot_thread_ts or snapshot_thread_msg_ts:
             threads_dir = self._threads_dir(channel_id)
             if threads_dir.exists():
-                for thread_ts in snapshot_thread_ts:
+                selected_threads = set(snapshot_thread_ts or ())
+                if snapshot_thread_msg_ts is not None:
+                    selected_threads.update(snapshot_thread_msg_ts)
+                for thread_ts in selected_threads:
                     thread_path = self._thread_buffer_path(channel_id, thread_ts)
                     if thread_path.exists():
-                        thread_msgs = self._read_jsonl(thread_path)
-                        if thread_msgs:
-                            self.append_judged(channel_id, thread_msgs)
-                        thread_path.unlink()
-                        # lock 파일도 정리
-                        lock_path = self._thread_buffer_lock(channel_id, thread_ts)
-                        if lock_path.exists():
-                            lock_path.unlink()
+                        thread_lock = FileLock(
+                            str(self._thread_buffer_lock(channel_id, thread_ts)),
+                            timeout=5,
+                        )
+                        with thread_lock:
+                            thread_msgs = self._read_jsonl(thread_path)
+                            if snapshot_thread_msg_ts is None:
+                                to_judged = thread_msgs
+                                remaining = []
+                            else:
+                                consumed = snapshot_thread_msg_ts.get(thread_ts, set())
+                                to_judged = [
+                                    msg for msg in thread_msgs
+                                    if str(msg.get("ts") or "") in consumed
+                                ]
+                                remaining = [
+                                    msg for msg in thread_msgs
+                                    if str(msg.get("ts") or "") not in consumed
+                                ]
+                            if to_judged:
+                                self.append_judged(channel_id, to_judged)
+                            if remaining:
+                                with open(thread_path, "w", encoding="utf-8") as handle:
+                                    for msg in remaining:
+                                        handle.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                            elif thread_path.exists():
+                                thread_path.unlink()
 
     # ── 스레드 메시지 버퍼 ───────────────────────────────
 
@@ -274,6 +384,10 @@ class ChannelStore:
             if messages:
                 result[thread_ts] = messages
         return result
+
+    def load_all_buffered_threads(self, channel_id: str) -> dict[str, list[dict]]:
+        """load_all_thread_buffers의 PAS 문맥 호환 이름."""
+        return self.load_all_thread_buffers(channel_id)
 
     # ── 토큰 카운팅 ─────────────────────────────────────
 
